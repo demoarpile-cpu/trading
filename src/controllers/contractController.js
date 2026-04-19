@@ -2,27 +2,29 @@ const fs = require('fs');
 const path = require('path');
 const kiteService = require('../utils/kiteService');
 
-const CONTRACT_FILE = path.join(__dirname, '../data/selected_contracts.json');
+const EXCLUDED_FILE = path.join(__dirname, '../data/excluded_contracts.json');
 const CONTRACTS_CACHE_FILE = path.join(__dirname, '../data/contracts_cache.json');
 const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
 
 // Ensure data directory exists
-const dataDir = path.dirname(CONTRACT_FILE);
+const dataDir = path.dirname(EXCLUDED_FILE);
 if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
 }
 
-// Initialize or load selected contracts
-let selectedContracts = [];
-function loadSelectedContracts() {
+// Initialize or load excluded contracts
+let excludedContracts = [];
+function loadExcludedContracts() {
     try {
-        if (fs.existsSync(CONTRACT_FILE)) {
-            const data = fs.readFileSync(CONTRACT_FILE, 'utf8');
-            selectedContracts = JSON.parse(data) || [];
+        if (fs.existsSync(EXCLUDED_FILE)) {
+            const data = fs.readFileSync(EXCLUDED_FILE, 'utf8');
+            excludedContracts = JSON.parse(data) || [];
+            global.EXCLUDED_CONTRACTS = excludedContracts; // Shared globally
         }
     } catch (err) {
-        console.error('Error loading selected contracts:', err.message);
-        selectedContracts = [];
+        console.error('Error loading excluded contracts:', err.message);
+        excludedContracts = [];
+        global.EXCLUDED_CONTRACTS = [];
     }
 }
 
@@ -30,202 +32,163 @@ function loadSelectedContracts() {
 let allContractsCache = null;
 let cacheTimestamp = 0;
 
-// Parse contracts from Kite instruments data
+/**
+ * Parse FUT contracts from Kite instruments — MCX + NFO + NSE exchanges.
+ */
 function parseContractsFromKite(instruments) {
     const contracts = [];
     const seen = new Set();
+    const SUPPORTED = new Set(['MCX', 'NFO', 'NSE']);
 
     instruments.forEach(instr => {
-        // Filter for futures only (ending with FUT)
-        if (!instr.tradingsymbol || !instr.tradingsymbol.endsWith('FUT')) return;
+        if (!SUPPORTED.has(instr.exchange)) return;
+        if (String(instr.instrument_type || '').toUpperCase() !== 'FUT') return;
+        if (!instr.tradingsymbol) return;
+        if (instr.expiry && new Date(instr.expiry) < new Date()) return;
 
         const symbol = `${instr.exchange}:${instr.tradingsymbol}`;
-
-        // Avoid duplicates
         if (seen.has(symbol)) return;
         seen.add(symbol);
 
-        // Extract commodity name and expiry from trading symbol
-        // Format: CRUDEOIL26APRFUT → name: CRUDEOIL, expiry: 26APR
-        const match = instr.tradingsymbol.match(/^([A-Z]+)(\d{1,2}[A-Z]{3}\d{0,2})FUT$/);
-
+        const match = instr.tradingsymbol.match(/^([A-Z&]+)(\d{1,2}[A-Z]{3}\d{0,2})FUT$/);
         if (match) {
             const [, name, expiry] = match;
             contracts.push({
                 symbol,
-                name,
+                name: instr.name || name,
+                trading_symbol: instr.tradingsymbol,
                 expiry,
                 segment: instr.exchange,
-                instrument_token: instr.instrument_token
+                instrument_token: instr.instrument_token,
+                lot_size: instr.lot_size || null
             });
         }
+    });
+
+    const ORDER = { MCX: 0, NFO: 1, NSE: 2 };
+    contracts.sort((a, b) => {
+        const segDiff = (ORDER[a.segment] ?? 9) - (ORDER[b.segment] ?? 9);
+        if (segDiff !== 0) return segDiff;
+        return a.name.localeCompare(b.name) || a.expiry.localeCompare(b.expiry);
     });
 
     return contracts;
 }
 
-// Fetch contracts dynamically from Kite API
 async function getAllContractsFromKite() {
     try {
-        // Check cache first
         if (allContractsCache && (Date.now() - cacheTimestamp) < CACHE_DURATION) {
-            console.log('📦 Using cached contracts');
             return allContractsCache;
         }
-
-        console.log('🔄 Fetching contracts from Kite API...');
         const instruments = await kiteService.getInstruments();
-
-        if (!instruments || instruments.length === 0) {
-            throw new Error('No instruments returned from Kite API');
-        }
-
         const contracts = parseContractsFromKite(instruments);
-        console.log(`✅ Fetched ${contracts.length} contracts from Kite API`);
-
-        // Save cache
         allContractsCache = contracts;
         cacheTimestamp = Date.now();
-
         try {
-            fs.writeFileSync(CONTRACTS_CACHE_FILE, JSON.stringify({
-                timestamp: cacheTimestamp,
-                data: contracts
-            }, null, 2));
-        } catch (e) {
-            console.warn('⚠️ Could not save contracts cache:', e.message);
-        }
-
+            fs.writeFileSync(CONTRACTS_CACHE_FILE, JSON.stringify({ timestamp: cacheTimestamp, data: contracts }, null, 2));
+        } catch (e) {}
         return contracts;
     } catch (err) {
-        console.error('❌ Error fetching from Kite API:', err.message);
-
-        // Fall back to cached file if it exists
         try {
             if (fs.existsSync(CONTRACTS_CACHE_FILE)) {
                 const cached = JSON.parse(fs.readFileSync(CONTRACTS_CACHE_FILE, 'utf8'));
-                console.log('📂 Using offline cache');
                 allContractsCache = cached.data;
                 cacheTimestamp = cached.timestamp;
                 return cached.data;
             }
-        } catch (e) {
-            console.error('No cache available:', e.message);
-        }
-
-        // Return empty array if everything fails
+        } catch (e) {}
         return [];
     }
 }
 
-loadSelectedContracts();
+loadExcludedContracts();
+
+// Returns array of excluded symbols
+function getExcludedSymbols() {
+    return excludedContracts.slice();
+}
+
+// ─── Cache Versioning ───
+// This is tracked globally to force watchlist refresh when selection changes
+global.WATCHLIST_CONFIG_VERSION = Date.now();
+
+function _bustWatchlistCache() {
+    global.WATCHLIST_CONFIG_VERSION = Date.now();
+    console.log('🔄 Watchlist Config Version Updated:', global.WATCHLIST_CONFIG_VERSION);
+}
 
 // Get all available contracts
 exports.getAllContracts = async (req, res) => {
     try {
         const allContracts = await getAllContractsFromKite();
-
         const contracts = allContracts.map(contract => ({
             ...contract,
-            isSelected: selectedContracts.includes(contract.symbol)
+            isSelected: !excludedContracts.includes(contract.symbol)
         }));
-
-        res.json({
-            status: 'success',
-            total: contracts.length,
-            data: contracts
-        });
+        res.json({ status: 'success', total: contracts.length, data: contracts });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
 
-// Get selected contracts only
+// Get selected contracts only (for backward compat if needed)
 exports.getSelectedContracts = async (req, res) => {
     try {
         const allContracts = await getAllContractsFromKite();
-        const selected = allContracts.filter(contract =>
-            selectedContracts.includes(contract.symbol)
-        );
-
-        res.json({
-            status: 'success',
-            count: selected.length,
-            data: selected.map(c => c.symbol)
-        });
+        const selected = allContracts.filter(contract => !excludedContracts.includes(contract.symbol));
+        res.json({ status: 'success', count: selected.length, data: selected.map(c => c.symbol) });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
 
-// Save selected contracts
+// Save selection
 exports.saveContractSelection = async (req, res) => {
     try {
-        const { contracts } = req.body;
-
+        const { contracts } = req.body; // symbols that WERE SELECTED (checked)
         if (!Array.isArray(contracts)) {
             return res.status(400).json({ error: 'contracts must be an array' });
         }
-
-        // Validate that all selected contracts exist
         const allContracts = await getAllContractsFromKite();
-        const validSymbols = allContracts.map(c => c.symbol);
-        const invalidSymbols = contracts.filter(c => !validSymbols.includes(c));
+        const allSymbols = allContracts.map(c => c.symbol);
+        
+        // Excluded = All - Selected
+        const excluded = allSymbols.filter(sym => !contracts.includes(sym));
+        excludedContracts = excluded;
+        global.EXCLUDED_CONTRACTS = excluded;
+        fs.writeFileSync(EXCLUDED_FILE, JSON.stringify(excluded, null, 2));
+        _bustWatchlistCache();
 
-        if (invalidSymbols.length > 0) {
-            return res.status(400).json({
-                error: 'Invalid contract symbols',
-                invalid: invalidSymbols
-            });
+        // Broadcast to all connected users to refresh their snapshot (and exclusions)
+        try {
+            const socketManager = require('../websocket/SocketManager');
+            socketManager.broadcastMarketSnapshotRefresh();
+        } catch (err) {
+            console.error('Failed to broadcast snapshot refresh:', err.message);
         }
 
-        // Save to file
-        selectedContracts = contracts;
-        fs.writeFileSync(CONTRACT_FILE, JSON.stringify(contracts, null, 2));
-
-        res.json({
-            status: 'success',
-            message: `${contracts.length} contracts selected and saved`,
-            selected: contracts
-        });
+        res.json({ status: 'success', message: 'Selection updated', excluded_count: excluded.length });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
 
-// Search contracts
 exports.searchContracts = async (req, res) => {
     try {
         const { q } = req.query;
         const allContracts = await getAllContractsFromKite();
-
-        if (!q) {
-            return res.json({
-                status: 'success',
-                total: allContracts.length,
-                data: allContracts.map(contract => ({
-                    ...contract,
-                    isSelected: selectedContracts.includes(contract.symbol)
-                }))
-            });
-        }
-
-        const searchTerm = q.toLowerCase();
-        const filtered = allContracts.filter(contract =>
-            contract.name.toLowerCase().includes(searchTerm) ||
-            contract.symbol.toLowerCase().includes(searchTerm) ||
-            contract.expiry.toLowerCase().includes(searchTerm)
-        ).map(contract => ({
-            ...contract,
-            isSelected: selectedContracts.includes(contract.symbol)
+        const searchTerm = (q || '').toLowerCase();
+        const filtered = allContracts.filter(c => 
+            c.name.toLowerCase().includes(searchTerm) || 
+            c.symbol.toLowerCase().includes(searchTerm)
+        ).map(c => ({
+            ...c,
+            isSelected: !excludedContracts.includes(c.symbol)
         }));
-
-        res.json({
-            status: 'success',
-            total: filtered.length,
-            data: filtered
-        });
+        res.json({ status: 'success', total: filtered.length, data: filtered });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 };
+
+exports.getExcludedSymbols = getExcludedSymbols;

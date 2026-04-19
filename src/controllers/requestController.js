@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const { logAction } = require('./systemController');
 const { uploadFile } = require('../utils/imagekit');
+const MarginUtils = require('../utils/MarginUtils');
 
 const getRequests = async (req, res) => {
     const { type, status } = req.query; // type: DEPOSIT/WITHDRAW, status: PENDING
@@ -25,6 +26,22 @@ const getRequests = async (req, res) => {
         query += ' ORDER BY r.created_at DESC';
 
         const [rows] = await db.execute(query, params);
+
+        // Add withdrawable balance for withdrawal requests
+        if (type === 'WITHDRAW') {
+            for (let i = 0; i < rows.length; i++) {
+                const userId = rows[i].user_id;
+                const [trades] = await db.execute('SELECT * FROM trades WHERE user_id = ? AND status = "OPEN"', [userId]);
+                const [settings] = await db.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [userId]);
+                const clientConfig = settings.length > 0 ? JSON.parse(settings[0].config_json || '{}') : {};
+                
+                const blockedMargin = MarginUtils.calculateTotalRequiredHoldingMargin(trades, clientConfig);
+                rows[i].withdrawable_balance = (rows[i].current_balance || 0) - blockedMargin;
+                rows[i].blocked_holding_margin = blockedMargin;
+                console.log(`[getRequests] User ${userId}: Balance=${rows[i].current_balance}, Blocked=${blockedMargin}, Withdrawable=${rows[i].withdrawable_balance}`);
+            }
+        }
+
         res.json(rows);
     } catch (err) {
         console.error(err);
@@ -46,19 +63,30 @@ const updateRequestStatus = async (req, res) => {
         const request = requests[0];
 
         if (status === 'APPROVED') {
-            // 2. Update User Balance
-            const operator = request.type === 'DEPOSIT' ? '+' : '-';
-            // For withdrawals, check if user has enough balance
+            // 2. Get User Details
+            const [userRows] = await connection.execute('SELECT balance FROM users WHERE id = ?', [request.user_id]);
+            const user = userRows[0];
+
             if (request.type === 'WITHDRAW') {
-                const [userRows] = await connection.execute('SELECT balance FROM users WHERE id = ?', [request.user_id]);
-                if (userRows[0].balance < request.amount) throw new Error('Insufficient balance');
+                // Fetch Open Trades and Config
+                const [trades] = await connection.execute('SELECT * FROM trades WHERE user_id = ? AND status = "OPEN"', [request.user_id]);
+                const [settings] = await connection.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [request.user_id]);
+                const clientConfig = settings.length > 0 ? JSON.parse(settings[0].config_json || '{}') : {};
+
+                const blockedMargin = MarginUtils.calculateTotalRequiredHoldingMargin(trades, clientConfig);
+                const withdrawable = user.balance - blockedMargin;
+
+                if (request.amount > withdrawable) {
+                    throw new Error(`Insufficient Withdrawable Balance. Required Holding Margin: ₹${blockedMargin.toFixed(2)}, Available to Withdraw: ₹${withdrawable.toFixed(2)}`);
+                }
             }
-            
+
+            const operator = request.type === 'DEPOSIT' ? '+' : '-';
             await connection.execute(`UPDATE users SET balance = balance ${operator} ? WHERE id = ?`, [request.amount, request.user_id]);
 
             // 3. Get New Balance for Ledger
-            const [userRows] = await connection.execute('SELECT balance FROM users WHERE id = ?', [request.user_id]);
-            const newBalance = userRows[0].balance;
+            const [updatedUserRows] = await connection.execute('SELECT balance FROM users WHERE id = ?', [request.user_id]);
+            const newBalance = updatedUserRows[0].balance;
 
             // 4. Record in Ledger
             await connection.execute(
@@ -107,8 +135,32 @@ const createRequest = async (req, res) => {
 
     try {
         // Validate required fields
-        if (!amount || !type) {
-            return res.status(400).json({ message: 'Amount and type are required' });
+        // 1. Basic Balance Check (Simple)
+        if (type === 'WITHDRAW') {
+            const [userRows] = await db.execute('SELECT balance FROM users WHERE id = ?', [userId]);
+            const user = userRows[0];
+            
+            // 2. Complex Block Check
+            const [trades] = await db.execute('SELECT * FROM trades WHERE user_id = ? AND status = "OPEN"', [userId]);
+            const [settings] = await db.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [userId]);
+            const clientConfig = settings.length > 0 ? JSON.parse(settings[0].config_json || '{}') : {};
+
+            const blockedMargin = MarginUtils.calculateTotalRequiredHoldingMargin(trades, clientConfig);
+            const withdrawable = (user.balance || 0) - blockedMargin;
+
+            console.log(`[createRequest] WITHDRAW Check: User=${userId}, Balance=${user.balance}, Blocked=${blockedMargin}, Withdrawable=${withdrawable}, Requested=${amount}`);
+
+            if (amount > withdrawable) {
+                return res.status(400).json({ 
+                    message: `Insufficient Withdrawable Balance. You have open positions requiring margin.`,
+                    details: {
+                        ledgerBalance: parseFloat(user.balance || 0).toFixed(2),
+                        blockedMargin: blockedMargin.toFixed(2),
+                        withdrawable: withdrawable.toFixed(2),
+                        requested: parseFloat(amount).toFixed(2)
+                    }
+                });
+            }
         }
 
         if (req.file) {

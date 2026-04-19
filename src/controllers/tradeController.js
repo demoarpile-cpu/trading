@@ -3,6 +3,7 @@ const { logAction } = require('./systemController');
 const mockEngine = require('../utils/mockEngine');
 const bcrypt = require('bcryptjs');
 const { invalidateCache } = require('../utils/cacheManager');
+const { getMcxBaseScrip } = require('../utils/symbolHelper');
 
 
 /**
@@ -69,24 +70,26 @@ const placeOrder = async (req, res) => {
             return res.status(404).json({ message: 'Target user not found' });
         }
 
-        // 4. Validate Transaction Password for the requester
-        const [requesterRows] = await db.execute(
-            'SELECT transaction_password FROM users WHERE id = ?',
-            [requesterId]
-        );
-        const requester = requesterRows[0];
+        // 4. Validate Transaction Password (Bypass for TRADER/Client)
+        if (requesterRole !== 'TRADER') {
+            const [requesterRows] = await db.execute(
+                'SELECT transaction_password FROM users WHERE id = ?',
+                [requesterId]
+            );
+            const requester = requesterRows[0];
 
-        if (!requester || !requester.transaction_password) {
-            return res.status(400).json({ message: 'Your transaction password is not set' });
-        }
+            if (!requester || !requester.transaction_password) {
+                return res.status(400).json({ message: 'Your transaction password is not set' });
+            }
 
-        if (!transactionPassword) {
-            return res.status(400).json({ message: 'Transaction password is required' });
-        }
+            if (!transactionPassword) {
+                return res.status(400).json({ message: 'Transaction password is required' });
+            }
 
-        const isMatch = await bcrypt.compare(transactionPassword, requester.transaction_password);
-        if (!isMatch) {
-            return res.status(403).json({ message: 'Invalid transaction password' });
+            const isMatch = await bcrypt.compare(transactionPassword, requester.transaction_password);
+            if (!isMatch) {
+                return res.status(403).json({ message: 'Invalid transaction password' });
+            }
         }
 
         // ─── FETCH CLIENT CONFIG FOR VALIDATIONS ───────────────────────────────
@@ -484,29 +487,32 @@ const placeOrder = async (req, res) => {
             }
         }
 
-        // ─── EXPOSURE-BASED MARGIN CALCULATION (PHASE 2) ──────────────────────
-        let marginRequired = 0;
-
-        // MCX Intraday Exposure (new trades are always intraday when placed)
+        // MCX Intraday/Holding Exposure
         if (marketType === 'MCX') {
-            // For new trades being placed, always use intraday exposure
-            // (holding exposure only applies when closing existing overnight positions)
-            const exposureValue = parseInt(clientConfig.mcxIntradayMargin || 500);
-            console.log(`[placeOrder] New MCX trade - Using intraday exposure: ${exposureValue}`);
+            const baseScrip = getMcxBaseScrip(symbol);
+            const brokerMargins = clientConfig.brokerMcxMargins || {};
+            
+            // Priority 1: Scrip-specific Lot-wise Margin (Fixed Amount)
+            // Defaulting to INTRADAY as per simpler requirements
+            const fixedMarginKey = `${baseScrip} INTRADAY`;
+            const fixedMarginValue = parseFloat(brokerMargins[fixedMarginKey] || 0);
 
-            // Exposure calculation: turnover / exposure = margin
-            const turnover = executionPrice * qtyNum;
-            const exposureType = clientConfig.exposureMcxType || 'Per Turnover Basis';
-
-            if (exposureType === 'Per Turnover Basis') {
-                // Margin = (Price × Qty) / Exposure
-                marginRequired = turnover / exposureValue;
+            if (fixedMarginValue > 1) {
+                marginRequired = fixedMarginValue * qtyNum;
+                console.log(`[placeOrder] ✅ MCX Fixed Margin: Scrip=${baseScrip}, PerLot=${fixedMarginValue}, Qty=${qtyNum}, Total=${marginRequired}`);
             } else {
-                // Fixed exposure
-                marginRequired = exposureValue * qtyNum;
-            }
+                // Priority 2: Global Exposure-based Calculation
+                const exposureValue = parseInt(clientConfig.mcxIntradayMargin || 500);
+                const turnover = executionPrice * qtyNum;
+                const exposureType = clientConfig.exposureMcxType || 'Per Turnover Basis';
 
-            console.log(`[placeOrder] ✅ MCX Exposure: Turnover=${turnover}, Exposure=${exposureValue}, MarginRequired=${marginRequired.toFixed(2)}`);
+                if (exposureType === 'Per Turnover Basis') {
+                    marginRequired = turnover / exposureValue;
+                } else {
+                    marginRequired = exposureValue * qtyNum;
+                }
+                console.log(`[placeOrder] ✅ MCX Exposure: Turnover=${turnover}, Value=${exposureValue}, Type=${exposureType}, MarginRequired=${marginRequired.toFixed(2)}`);
+            }
         }
 
         // EQUITY Intraday/Holding Exposure
@@ -928,21 +934,41 @@ const getTrades = async (req, res) => {
         if (user_id) {
             query += ' AND t.user_id = ?';
             params.push(user_id);
-            
-            // Even if user_id is provided, non-traders should only see trades they created for that user
+
+            // Role-based visibility logic: "Jisme jo trade banai usko vahi dikhe"
+            // ENHANCED: Admins/Brokers can also see trades of their direct subordinates
             if (req.user.role !== 'TRADER') {
-                query += ' AND t.created_by = ?';
-                params.push(req.user.id);
+                query += ` AND (t.created_by = ? OR t.user_id IN (
+                    SELECT u.id FROM users u 
+                    LEFT JOIN client_settings cs ON u.id = cs.user_id 
+                    WHERE u.parent_id = ? OR cs.broker_id = ?
+                ))`;
+                params.push(req.user.id, req.user.id, req.user.id);
             }
         } else {
-            // Role-based visibility logic: "Jisme jo trade banai usko vahi dikhe"
-            if (req.user.role === 'TRADER') {
-                // Traders see their own trades
-                query += ' AND t.user_id = ?';
-                params.push(req.user.id);
+            // Role-based visibility logic for global list
+            if (req.user.role === 'SUPERADMIN') {
+                // Superadmins can see everything
+                console.log('[getTrades] SUPERADMIN viewing all trades');
+            } else if (req.user.role === 'ADMIN') {
+                // Admins see their own created trades OR trades of their descendants
+                query += ` AND (t.created_by = ? OR t.user_id IN (
+                    SELECT u.id FROM users u 
+                    LEFT JOIN client_settings cs ON u.id = cs.user_id
+                    WHERE u.parent_id = ? OR cs.broker_id IN (SELECT id FROM users WHERE parent_id = ?)
+                ))`;
+                params.push(req.user.id, req.user.id, req.user.id);
+            } else if (req.user.role === 'BROKER') {
+                // Brokers see trades they created OR trades of their clients/sub-brokers
+                query += ` AND (t.created_by = ? OR t.user_id IN (
+                    SELECT u.id FROM users u 
+                    LEFT JOIN client_settings cs ON u.id = cs.user_id 
+                    WHERE u.parent_id = ? OR cs.broker_id = ?
+                ))`;
+                params.push(req.user.id, req.user.id, req.user.id);
             } else {
-                // Admins, Brokers, Superadmins see only trades THEY created
-                query += ' AND t.created_by = ?';
+                // TRADER see only their own (already handled in initial if, but safety fallback)
+                query += ' AND t.user_id = ?';
                 params.push(req.user.id);
             }
         }
@@ -1000,13 +1026,25 @@ const getTradeById = async (req, res) => {
 
         const trade = rows[0];
         const { id: requesterId } = req.user;
-        
+
         // Access check: "Jisme jo trade banai usko vahi dikhe"
-        // Target user (Trader) can see their own trades OR Creator can see trades they placed
+        // ENHANCED: Also allow Admin/Broker to see if it's their subordinate's trade
         const isTargetUser = trade.user_id === requesterId;
         const isCreator = trade.created_by === requesterId;
-
+        
+        let isParent = false;
         if (!isTargetUser && !isCreator) {
+            // Check if requester is parent or broker
+            const [relRows] = await db.execute(
+                `SELECT u.id FROM users u 
+                 LEFT JOIN client_settings cs ON u.id = cs.user_id 
+                 WHERE u.id = ? AND (u.parent_id = ? OR cs.broker_id = ?)`,
+                [trade.user_id, requesterId, requesterId]
+            );
+            isParent = relRows.length > 0;
+        }
+
+        if (!isTargetUser && !isCreator && !isParent) {
             return res.status(403).json({ message: 'Not authorized to view this trade' });
         }
 
@@ -1040,10 +1078,25 @@ const getGroupTrades = async (req, res) => {
         if (role === 'TRADER') {
             query += ` AND t.user_id = ?`;
             params.push(id);
-        } else {
-            // For others, only show groups of trades THEY created
-            query += ` AND t.created_by = ?`;
-            params.push(id);
+        } else if (role === 'SUPERADMIN') {
+            // Superadmin sees groups for all users
+            console.log('[getGroupTrades] SUPERADMIN viewing all groups');
+        } else if (role === 'ADMIN') {
+            // Admin sees their groups OR their descendants' groups
+            query += ` AND (t.created_by = ? OR t.user_id IN (
+                SELECT u.id FROM users u 
+                LEFT JOIN client_settings cs ON u.id = cs.user_id
+                WHERE u.parent_id = ? OR cs.broker_id IN (SELECT id FROM users WHERE parent_id = ?)
+            ))`;
+            params.push(id, id, id);
+        } else if (role === 'BROKER') {
+            // Broker sees their own created groups OR their clients' groups
+            query += ` AND (t.created_by = ? OR t.user_id IN (
+                SELECT u.id FROM users u 
+                LEFT JOIN client_settings cs ON u.id = cs.user_id 
+                WHERE u.parent_id = ? OR cs.broker_id = ?
+            ))`;
+            params.push(id, id, id);
         }
         // Note: Joining users table is kept if needed for future filters, 
         // though currently we filter by trade.user_id/created_by directly where possible.
@@ -1081,324 +1134,74 @@ const getGroupTrades = async (req, res) => {
     }
 };
 
+const tradeService = require('../services/TradeService');
+
 /**
  * Close/Square-off Trade
  * - Pending orders (is_pending=1): cancelled immediately, margin refunded, no PnL
  * - Open orders: closed at exitPrice or current market price
  */
 const closeTrade = async (req, res) => {
-    const { exitPrice } = req.body;
     try {
+        const { exitPrice } = req.body;
+        const requesterId = req.user.id;
+
+        // 1. Initial Fetch to check feasibility
         const [trades] = await db.execute('SELECT * FROM trades WHERE id = ?', [req.params.id]);
         if (trades.length === 0) return res.status(404).json({ message: 'Trade not found' });
 
         const trade = trades[0];
-
         if (trade.status !== 'OPEN') {
             return res.status(400).json({ message: 'Trade is already closed or inactive' });
         }
 
-        // ─── MIN TIME TO PROFIT VALIDATION (PHASE 1) ─────────────────────────
-        // Get client config
+        // ─── VALIDATIONS (Min Time / Scalping SL) ─────────────────────────
         const [clientSettings] = await db.execute(
             'SELECT config_json FROM client_settings WHERE user_id = ?',
             [trade.user_id]
         );
         const clientConfig = clientSettings.length > 0 ? JSON.parse(clientSettings[0].config_json || '{}') : {};
 
-        // Get min time to profit for this segment
         let minTimeSeconds = 0;
-        if (trade.market_type === 'MCX') {
-            minTimeSeconds = parseInt(clientConfig.mcxMinTimeToBookProfit || 0);
-        } else if (trade.market_type === 'EQUITY') {
-            minTimeSeconds = parseInt(clientConfig.equityMinTimeToBookProfit || 0);
-        }
+        if (trade.market_type === 'MCX') minTimeSeconds = parseInt(clientConfig.mcxMinTimeToBookProfit || 0);
+        else if (trade.market_type === 'EQUITY') minTimeSeconds = parseInt(clientConfig.equityMinTimeToBookProfit || 0);
 
-        // Check if trade held long enough
-        if (minTimeSeconds > 0) {
-            const entryTime = new Date(trade.entry_time);
-            const now = new Date();
-            const secondsHeld = Math.floor((now - entryTime) / 1000);
-
-            // Only check if trying to close in profit
-            const currentPrice = exitPrice || mockEngine.getPrice(trade.symbol);
-            const pnl = trade.type === 'BUY'
-                ? (currentPrice - trade.entry_price) * trade.qty
-                : (trade.entry_price - currentPrice) * trade.qty;
-
-            if (pnl > 0 && secondsHeld < minTimeSeconds) {
-                const remainingSeconds = minTimeSeconds - secondsHeld;
-                return res.status(400).json({
-                    message: `Minimum profit booking time is ${minTimeSeconds} seconds. You can close in ${remainingSeconds} seconds.`,
-                    secondsHeld,
-                    minTimeSeconds,
-                    remainingSeconds
-                });
-            }
-            if (pnl > 0) {
-                console.log(`[closeTrade] ✅ Min time check passed: Held=${secondsHeld}s, Min=${minTimeSeconds}s`);
-            }
-        }
-
-        // ─── SCALPING STOP LOSS VALIDATION (TIER 2) ────────────────────────
-        // Block closing in loss if scalping stop loss is enabled and held < min time
-        let scalpingStopLossEnabled = false;
-        if (trade.market_type === 'MCX') {
-            scalpingStopLossEnabled = clientConfig.mcxScalpingStopLoss === 'Enabled';
-        } else if (trade.market_type === 'EQUITY') {
-            scalpingStopLossEnabled = clientConfig.equityScalpingStopLoss === 'Enabled';
-        } else if (trade.market_type === 'OPTIONS') {
-            scalpingStopLossEnabled = clientConfig.optionsScalpingStopLoss === 'Enabled';
-        } else if (trade.market_type === 'COMEX') {
-            scalpingStopLossEnabled = clientConfig.comexConfig?.scalpingStopLoss === 'Enabled';
-        } else if (trade.market_type === 'FOREX') {
-            scalpingStopLossEnabled = clientConfig.forexConfig?.scalpingStopLoss === 'Enabled';
-        } else if (trade.market_type === 'CRYPTO') {
-            scalpingStopLossEnabled = clientConfig.cryptoConfig?.scalpingStopLoss === 'Enabled';
-        }
-
-        if (scalpingStopLossEnabled) {
-            const currentPrice = exitPrice || mockEngine.getPrice(trade.symbol);
-            const pnlAtClose = trade.type === 'BUY'
-                ? (currentPrice - trade.entry_price) * trade.qty
-                : (trade.entry_price - currentPrice) * trade.qty;
-
-            // Only check if trying to close in loss
-            if (pnlAtClose < 0) {
-                const entryTime = new Date(trade.entry_time);
-                const now = new Date();
-                const secondsHeld = Math.floor((now - entryTime) / 1000);
-                // Get min time config
-                let minTimeSeconds = 0;
-                if (trade.market_type === 'MCX') {
-                    minTimeSeconds = parseInt(clientConfig.mcxMinTimeToBookProfit || 0);
-                } else if (trade.market_type === 'EQUITY') {
-                    minTimeSeconds = parseInt(clientConfig.equityMinTimeToBookProfit || 0);
-                } else if (trade.market_type === 'OPTIONS') {
-                    minTimeSeconds = parseInt(clientConfig.optionsMinTimeToBookProfit || 0);
-                }
-
-                if (minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
-                    const remainingSeconds = minTimeSeconds - secondsHeld;
-                    return res.status(400).json({
-                        message: `Scalping stop loss is enabled. Cannot close in loss before ${minTimeSeconds}s. Held: ${secondsHeld}s, Remaining: ${remainingSeconds}s`,
-                        secondsHeld,
-                        minRequired: minTimeSeconds,
-                        remainingSeconds,
-                        pnl: pnlAtClose
-                    });
-                }
-            }
-        }
-
-        const marginToRelease = parseFloat(trade.margin_used || 0);
-
-        // Pending orders: cancel with no PnL, just refund margin
-        if (trade.is_pending == 1) {
-            await db.execute(
-                'UPDATE trades SET status = "CANCELLED", exit_price = entry_price, exit_time = NOW(), pnl = 0 WHERE id = ?',
-                [req.params.id]
-            );
-            await db.execute(
-                'UPDATE users SET balance = balance + ? WHERE id = ?',
-                [marginToRelease, trade.user_id]
-            );
-            await logAction(req.user.id || trade.user_id, 'CANCEL_TRADE', 'trades', `Cancelled pending order #${trade.id}. Margin refunded: ${marginToRelease}`);
-            return res.json({ message: 'Pending order cancelled', pnl: 0, marginReleased: marginToRelease, newBalanceChange: marginToRelease });
-        }
-
-        // ─── AUTO CLOSE AT LOSS % (PHASE 2) ──────────────────────────────────
-        // Check if account losses exceed threshold and auto-close is enabled
-        const autoClosePct = parseInt(clientConfig.autoClosePercentage || 90);
-
-        // Get current user balance
-        const [userRows] = await db.execute('SELECT balance FROM users WHERE id = ?', [trade.user_id]);
-        const userBalance = parseFloat(userRows[0]?.balance || 0);
-
-        // Get all OPEN trades for this user
-        const [allOpenTrades] = await db.execute(
-            'SELECT id, pnl FROM trades WHERE user_id = ? AND status = "OPEN"',
-            [trade.user_id]
-        );
-
-        let totalOpenPnL = 0;
-        for (const openTrade of allOpenTrades) {
-            totalOpenPnL += parseFloat(openTrade.pnl || 0);
-        }
-
-        const lossPercentage = Math.abs(totalOpenPnL) / userBalance * 100;
-
-        if (totalOpenPnL < 0 && lossPercentage >= autoClosePct) {
-            console.log(`[closeTrade] ⚠️ AUTO CLOSE TRIGGERED: Loss=${Math.abs(totalOpenPnL).toFixed(2)}, LossPct=${lossPercentage.toFixed(2)}%, Threshold=${autoClosePct}%`);
-            // In production, this would trigger automatic closing of all trades
-            // For now, we log it and continue with manual close
-        }
-
-        const currentPrice = mockEngine.getPrice(trade.symbol);
-        const finalExitPrice = exitPrice || trade.exit_price || currentPrice;
-
+        const entryTime = new Date(trade.entry_time);
+        const now = new Date();
+        const secondsHeld = Math.floor((now - entryTime) / 1000);
+        const currentPrice = exitPrice || mockEngine.getPrice(trade.symbol) || trade.entry_price;
         const pnl = trade.type === 'BUY'
-            ? (finalExitPrice - trade.entry_price) * trade.qty
-            : (trade.entry_price - finalExitPrice) * trade.qty;
+            ? (currentPrice - trade.entry_price) * trade.qty
+            : (trade.entry_price - currentPrice) * trade.qty;
 
-        // ─── CALCULATE BROKERAGE FROM BROKER CONFIG (TIER 3) ─────────────────────────
-        let brokerage = 0;
-        let swap = 0;
-        let brokerSwapRate = 5;  // Default swap rate
-        try {
-            const [clientSettings] = await db.execute(
-                'SELECT broker_id, config_json FROM client_settings WHERE user_id = ?',
-                [trade.user_id]
-            );
-
-            if (clientSettings.length > 0 && clientSettings[0].broker_id) {
-                const brokerIdForClient = clientSettings[0].broker_id;
-                const clientConfig = JSON.parse(clientSettings[0].config_json || '{}');
-
-                // ─── SEGMENT-SPECIFIC BROKERAGE CALCULATION (TIER 3) ──────────
-                if (trade.market_type === 'MCX') {
-                    const brokerMcxBrokerage = clientConfig.brokerMcxBrokerage || {};
-                    const symbolBrokerage = brokerMcxBrokerage[trade.symbol];
-                    if (symbolBrokerage !== undefined) {
-                        brokerage = trade.qty * parseFloat(symbolBrokerage);
-                        console.log(`[closeTrade] ✅ MCX Brokerage: Symbol=${trade.symbol}, PerLot=${symbolBrokerage}, Total=${brokerage}`);
-                    }
-                } else if (trade.market_type === 'EQUITY') {
-                    const brokerEquityBrokerage = clientConfig.brokerEquityBrokerage || {};
-                    const symbolBrokerage = brokerEquityBrokerage[trade.symbol];
-                    if (symbolBrokerage !== undefined) {
-                        brokerage = trade.qty * parseFloat(symbolBrokerage);
-                        console.log(`[closeTrade] ✅ EQUITY Brokerage: Symbol=${trade.symbol}, PerLot=${symbolBrokerage}, Total=${brokerage}`);
-                    }
-                } else if (trade.market_type === 'OPTIONS') {
-                    // Options brokerage can be per-lot based
-                    let brokeragePerLot = 0;
-                    const brokerOptionsEquityBrokerage = clientConfig.brokerOptionsEquityBrokerage || 0;
-                    const brokerOptionsIndexBrokerage = clientConfig.brokerOptionsIndexBrokerage || 0;
-                    const brokerOptionsMcxBrokerage = clientConfig.brokerOptionsMcxBrokerage || 0;
-
-                    if (trade.symbol.includes('NIFTY') || trade.symbol.includes('BANKNIFTY')) {
-                        brokeragePerLot = parseFloat(brokerOptionsIndexBrokerage || 0);
-                    } else if (trade.symbol.includes('MCX')) {
-                        brokeragePerLot = parseFloat(brokerOptionsMcxBrokerage || 0);
-                    } else {
-                        brokeragePerLot = parseFloat(brokerOptionsEquityBrokerage || 0);
-                    }
-
-                    if (brokeragePerLot > 0) {
-                        brokerage = trade.qty * brokeragePerLot;
-                        console.log(`[closeTrade] ✅ OPTIONS Brokerage: Symbol=${trade.symbol}, PerLot=${brokeragePerLot}, Total=${brokerage}`);
-                    }
-                } else if (trade.market_type === 'COMEX') {
-                    const comexBrokeragePerLot = parseFloat(clientConfig.brokerComexBrokerage || 0);
-                    if (comexBrokeragePerLot > 0) {
-                        brokerage = trade.qty * comexBrokeragePerLot;
-                    }
-                } else if (trade.market_type === 'FOREX') {
-                    const forexBrokeragePerLot = parseFloat(clientConfig.brokerForexBrokerage || 0);
-                    if (forexBrokeragePerLot > 0) {
-                        brokerage = trade.qty * forexBrokeragePerLot;
-                    }
-                } else if (trade.market_type === 'CRYPTO') {
-                    const cryptoBrokeragePerLot = parseFloat(clientConfig.brokerCryptoBrokerage || 0);
-                    if (cryptoBrokeragePerLot > 0) {
-                        brokerage = trade.qty * cryptoBrokeragePerLot;
-                    }
-                }
-
-                // ─── CALCULATE SWAP CHARGES ────────────────────────────────
-                // Fetch broker's swap rate
-                const [brokerShares] = await db.execute(
-                    'SELECT swap_rate FROM broker_shares WHERE user_id = ?',
-                    [brokerIdForClient]
-                );
-                if (brokerShares.length > 0) {
-                    brokerSwapRate = parseFloat(brokerShares[0].swap_rate || 5);
-                }
-
-                // Calculate days held (swap charged for overnight holdings)
-                const entryTime = new Date(trade.entry_time);
-                const exitTime = new Date();
-                const daysHeld = Math.ceil((exitTime - entryTime) / (1000 * 60 * 60 * 24));
-
-                // Only charge swap if position held more than 1 day (MCX/EQUITY only)
-                if ((trade.market_type === 'MCX' || trade.market_type === 'EQUITY') && daysHeld > 1) {
-                    swap = trade.qty * brokerSwapRate * (daysHeld - 1);  // -1 because first day is intraday
-                    console.log(`[closeTrade] ✅ Swap: Qty=${trade.qty}, Rate=${brokerSwapRate}/lot, Days=${daysHeld - 1}, Total=${swap}`);
-                }
-            }
-        } catch (e) {
-            console.error('[closeTrade] Error calculating brokerage/swap from broker config:', e);
+        if (pnl > 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
+            return res.status(400).json({
+                message: `Minimum profit booking time is ${minTimeSeconds} seconds.`,
+                remainingSeconds: minTimeSeconds - secondsHeld
+            });
         }
 
-        // ─── LOSS NOTIFICATION CHECK (PHASE 2) ───────────────────────────────
-        const notifyPct = parseInt(clientConfig.notifyPercentage || 70);
+        let scalpingStopLossEnabled = false;
+        if (trade.market_type === 'MCX') scalpingStopLossEnabled = clientConfig.mcxScalpingStopLoss === 'Enabled';
+        else if (trade.market_type === 'EQUITY') scalpingStopLossEnabled = clientConfig.equityScalpingStopLoss === 'Enabled';
+        else if (trade.market_type === 'OPTIONS') scalpingStopLossEnabled = clientConfig.optionsScalpingStopLoss === 'Enabled';
 
-        // Recalculate total PnL after this trade close
-        const [updatedOpenTrades] = await db.execute(
-            'SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE user_id = ? AND status = "OPEN" AND id != ?',
-            [trade.user_id, trade.id]
-        );
-        const remainingOpenPnL = parseFloat(updatedOpenTrades[0]?.total_pnl || 0);
-        const newTotalPnL = remainingOpenPnL + pnl;
-        const newLossPercentage = newTotalPnL < 0 ? Math.abs(newTotalPnL) / userBalance * 100 : 0;
-
-        if (newTotalPnL < 0 && newLossPercentage >= notifyPct && newLossPercentage < autoClosePct) {
-            console.log(`[closeTrade] 🔔 NOTIFY CLIENT: Loss=${Math.abs(newTotalPnL).toFixed(2)}, LossPct=${newLossPercentage.toFixed(2)}%, NotifyThreshold=${notifyPct}%`);
-            // Send notification to client
-            try {
-                await db.execute(
-                    'INSERT INTO notifications (user_id, message, type, created_at) VALUES (?, ?, ?, NOW())',
-                    [
-                        trade.user_id,
-                        `⚠️ Account losses have reached ${newLossPercentage.toFixed(2)}% of ledger balance. Current loss: ₹${Math.abs(newTotalPnL).toFixed(2)}`,
-                        'LOSS_WARNING'
-                    ]
-                );
-            } catch (e) {
-                console.error('[closeTrade] Error creating notification:', e);
-            }
+        if (scalpingStopLossEnabled && pnl < 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
+            return res.status(400).json({
+                message: `Scalping stop loss is enabled. Cannot close in loss before ${minTimeSeconds}s.`
+            });
         }
 
-        // Release margin + Add/Subtract PnL - Deduct brokerage and swap
-        const balanceChange = pnl + marginToRelease - brokerage - swap;
-
-        await db.execute(
-            'UPDATE trades SET status = "CLOSED", exit_price = ?, exit_time = NOW(), pnl = ?, brokerage = ?, swap = ? WHERE id = ?',
-            [finalExitPrice, pnl, brokerage, swap, req.params.id]
-        );
-
-        // Update User Balance
-        await db.execute(
-            'UPDATE users SET balance = balance + ? WHERE id = ?',
-            [balanceChange, trade.user_id]
-        );
-
-        console.log(`✅ Trade ${trade.id} closed. PnL: ${pnl}, Margin Released: ${marginToRelease}, Brokerage: ${brokerage}, Swap: ${swap}, Balance Change: ${balanceChange}`);
-
-        // Log the action (Audit)
-        await logAction(req.user.id || trade.user_id, 'CLOSE_TRADE', 'trades', `Closed trade ID #${trade.id} @ ${finalExitPrice}. PnL: ${pnl}, Brokerage: ${brokerage}, Swap: ${swap}`);
-
-        // Clear cache on trade close (Option A - immediate consistency)
-        try {
-            await invalidateCache(`m2m_${trade.user_id}_TRADER`);
-            await invalidateCache(`m2m_${trade.user_id}_SUPERADMIN`);
-            console.log(`[Cache] Cleared trade cache for user ${trade.user_id}`);
-        } catch (e) {
-            console.log(`[Cache] Clear failed but trade closed`);
-        }
+        // ─── EXECUTE CLOSURE VIA SERVICE ──────────────────────────────────
+        const result = await tradeService.closeTrade(trade.id, exitPrice, requesterId);
 
         res.json({
             message: 'Trade closed successfully',
-            pnl,
-            marginReleased: marginToRelease,
-            brokerage,
-            swap,
-            newBalanceChange: balanceChange
+            ...result
         });
     } catch (err) {
         console.error('❌ Close Trade Error:', err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error', error: err.message });
     }
 };
 
@@ -1407,8 +1210,8 @@ const closeTrade = async (req, res) => {
  */
 const deleteTrade = async (req, res) => {
     try {
-        // Verify transaction password if provided
-        if (req.body && req.body.transactionPassword) {
+        // Verify transaction password if provided (Bypass for TRADER)
+        if (req.user.role !== 'TRADER' && req.body && req.body.transactionPassword) {
             const [users] = await db.execute('SELECT transaction_password FROM users WHERE id = ?', [req.user.id]);
             if (users.length && users[0].transaction_password) {
                 const match = await bcrypt.compare(req.body.transactionPassword, users[0].transaction_password);
@@ -1457,8 +1260,8 @@ const updateTrade = async (req, res) => {
     try {
         const { entry_price, exit_price, qty, transactionPassword } = req.body;
 
-        // Verify transaction password
-        if (transactionPassword) {
+        // Verify transaction password (Bypass for TRADER)
+        if (req.user.role !== 'TRADER' && transactionPassword) {
             const [users] = await db.execute('SELECT transaction_password FROM users WHERE id = ?', [req.user.id]);
             if (users.length && users[0].transaction_password) {
                 const match = await bcrypt.compare(transactionPassword, users[0].transaction_password);
@@ -1536,8 +1339,8 @@ const restoreTrade = async (req, res) => {
     try {
         const { transactionPassword } = req.body;
 
-        // Verify transaction password
-        if (transactionPassword) {
+        // Verify transaction password (Bypass for TRADER)
+        if (req.user.role !== 'TRADER' && transactionPassword) {
             const [users] = await db.execute('SELECT transaction_password FROM users WHERE id = ?', [req.user.id]);
             if (users.length && users[0].transaction_password) {
                 const match = await bcrypt.compare(transactionPassword, users[0].transaction_password);

@@ -11,6 +11,7 @@
  */
 
 const db = require('../config/db');
+const MarginUtils = require('../utils/MarginUtils');
 const openai = require('../config/openai');
 const { parseQuery } = require('../services/aiCommandParser');
 const { generateQuery } = require('../services/aiQueryGenerator');
@@ -741,9 +742,18 @@ const executeVoiceCommand = async (req, res) => {
             const [rows] = await connection.execute('SELECT id, balance, username FROM users WHERE id = ?', [resolvedUserId]);
             if (!rows.length) { await connection.rollback(); return res.status(404).json({ success: false, message: `User not found` }); }
             const currentBal = parseFloat(rows[0].balance || 0);
-            if (currentBal < amt) {
+            
+            // Margin Block Check
+            const [trades] = await connection.execute('SELECT * FROM trades WHERE user_id = ? AND status = "OPEN"', [resolvedUserId]);
+            const [settings] = await connection.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [resolvedUserId]);
+            const clientConfig = settings.length > 0 ? JSON.parse(settings[0].config_json || '{}') : {};
+
+            const blockedMargin = MarginUtils.calculateTotalRequiredHoldingMargin(trades, clientConfig);
+            const withdrawable = currentBal - blockedMargin;
+
+            if (amt > withdrawable) {
                 await connection.rollback();
-                return res.status(400).json({ success: false, message: `Insufficient balance. ${rows[0].username} has ₹${currentBal}` });
+                return res.status(400).json({ success: false, message: `Insufficient Withdrawable Balance. Client has open trades. Available: ₹${withdrawable.toFixed(2)}, Blocked: ₹${blockedMargin.toFixed(2)}` });
             }
             const newBalance = currentBal - amt;
             await connection.execute('UPDATE users SET balance = balance - ? WHERE id = ?', [amt, resolvedUserId]);
@@ -790,7 +800,20 @@ const executeVoiceCommand = async (req, res) => {
             const [toRows] = await connection.execute('SELECT id, balance FROM users WHERE id = ? FOR UPDATE', [toUserId]);
             if (!toRows.length) { await connection.rollback(); return res.status(404).json({ success: false, message: `Dest user ${toUserId} not found` }); }
             const fromBal = parseFloat(fromRows[0].balance || 0);
-            if (fromBal < amt) { await connection.rollback(); return res.status(400).json({ success: false, message: `Insufficient balance` }); }
+
+            // Margin Block Check for Source User
+            const [trades] = await connection.execute('SELECT * FROM trades WHERE user_id = ? AND status = "OPEN"', [fromUserId]);
+            const [settings] = await connection.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [fromUserId]);
+            const clientConfig = settings.length > 0 ? JSON.parse(settings[0].config_json || '{}') : {};
+
+            const blockedMargin = MarginUtils.calculateTotalRequiredHoldingMargin(trades, clientConfig);
+            const withdrawable = fromBal - blockedMargin;
+
+            if (amt > withdrawable) {
+                await connection.rollback();
+                return res.status(400).json({ success: false, message: `Insufficient balance to transfer. Source user has open trades. Available: ₹${withdrawable.toFixed(2)}` });
+            }
+
             const newFrom = fromBal - amt;
             const newTo = parseFloat(toRows[0].balance || 0) + amt;
             await connection.execute('UPDATE users SET balance = balance - ? WHERE id = ?', [amt, fromUserId]);

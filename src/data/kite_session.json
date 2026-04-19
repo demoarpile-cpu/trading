@@ -1,11 +1,8 @@
 {
-  "access_token": "7zy7cdBW6heIvrWJPnzSKRcy8W36Nwx3",
-  "public_token": "wIAXhORFml8knoC0BQAUgsRRqVgrlgLD",
-  "refresh_token": "",
-  "enctoken": "3ALpAslzUaMqY6vfzUnX0UQ001u4J3mzsh1FEDweN+7oQ5t6DR93j81m7Tgh+yVsOC7BE15RMo+bA6am6l1ySFeexAkdrz0XCmOdicfCVJCjDz0Ks02+37bmIdjSC/w=",
-  "login_time": "2026-04-10 13:19:50",
-  "meta": {
-    "demat_consent": "consent"
-  },
-  "saved_at": "2026-04-10T12:47:47.340Z"
+  "access_token": "Eh4abfS5523k3jSmFKtQ5OAOwiMCb09i",
+  "user_name": "Ashish Jha",
+  "user_id": "EHY834",
+  "email": "ashish.jha382@gmail.com",
+  "broker": "ZERODHA",
+  "saved_at": "2026-04-18T11:34:52.085Z"
 }

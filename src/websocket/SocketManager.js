@@ -1,9 +1,10 @@
 const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
 
 /**
  * Socket Manager
  * Handles socket.io initialization and provides a getter for the io instance.
-//  */ 
+//  */
 //  test
 class SocketManager {
     constructor() {
@@ -22,6 +23,22 @@ class SocketManager {
             transports: ['websocket', 'polling']  // Enable both
         });
 
+        this.io.use((socket, next) => {
+            try {
+                const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+                if (!token) {
+                    socket.user = null;
+                    return next();
+                }
+                const decoded = jwt.verify(token, process.env.JWT_SECRET);
+                socket.user = decoded;
+                next();
+            } catch (e) {
+                socket.user = null;
+                next();
+            }
+        });
+
         this.io.on('connection', (socket) => {
             // console.log('User connected:', socket.id);
 
@@ -30,21 +47,89 @@ class SocketManager {
                 if (role) socket.join(`role:${role}`);
             });
 
+            socket.on('request_market_snapshot', async (query) => {
+                const kiteRoutes = require('../routes/kiteRoutes');
+                const marketDataService = require('../services/MarketDataService');
+
+                if (!socket.user?.id) {
+                    socket.emit('market_snapshot', {
+                        error: 'Unauthorized',
+                        kite_connected: false,
+                        kite_disconnected: true,
+                        watchlist: [],
+                        crypto: [],
+                        forex: []
+                    });
+                    return;
+                }
+
+                try {
+                    const userId = socket.user.id;
+                    const q = query && typeof query === 'object' ? query : {};
+                    const kiteResult = await kiteRoutes.fetchUnifiedWatchlistForSocket(userId, q);
+
+                    const crypto = marketDataService.getCryptoPrices();
+                    const forex = marketDataService.getForexPrices();
+
+                    const kite_connected = Boolean(kiteResult.ok && !kiteResult.kite_disconnected);
+
+                    let dashboard = null;
+                    try {
+                        if (kite_connected) {
+                            dashboard = await kiteRoutes.buildKiteDashboardPayload(userId);
+                        }
+                    } catch (dashErr) {
+                        if (dashErr.message !== 'KITE_NOT_CONNECTED') {
+                            console.warn('market_snapshot dashboard:', dashErr.message);
+                        }
+                    }
+
+                    socket.emit('market_snapshot', {
+                        kite_connected,
+                        kite_disconnected: !!kiteResult.kite_disconnected,
+                        watchlist: Array.isArray(kiteResult.data) ? kiteResult.data : [],
+                        crypto,
+                        forex,
+                        dashboard,
+                        excludedContracts: global.EXCLUDED_CONTRACTS || [],
+                        error: kiteResult.error || null
+                    });
+                } catch (e) {
+                    console.error('request_market_snapshot:', e.message);
+                    socket.emit('market_snapshot', {
+                        error: e.message,
+                        kite_connected: false,
+                        kite_disconnected: true,
+                        watchlist: [],
+                        crypto: [],
+                        forex: []
+                    });
+                }
+            });
+
             socket.on('subscribe_market', (scrips) => {
                 const marketDataService = require('../services/MarketDataService');
                 const instrumentService = require('../services/InstrumentService');
 
                 if (Array.isArray(scrips)) {
-                    scrips.forEach(async (symbol) => {
-                        try {
-                            const instrument = await instrumentService.getInstrumentBySymbol(symbol);
-                            if (instrument) {
-                                marketDataService.subscribe(symbol, instrument.instrument_token);
-                            }
-                        } catch (e) {
-                            console.error(`Subscription failed for ${symbol}:`, e.message);
-                        }
-                    });
+                    const normalizedSymbols = Array.from(
+                        new Set(
+                            scrips
+                                .map((symbol) => String(symbol || '').trim().toUpperCase())
+                                .filter(Boolean)
+                        )
+                    );
+
+                    instrumentService.getInstrumentsBySymbols(normalizedSymbols)
+                        .then((instrumentsBySymbol) => {
+                            normalizedSymbols.forEach((symbol) => {
+                                const instrument = instrumentsBySymbol.get(symbol);
+                                marketDataService.subscribe(symbol, instrument?.instrument_token);
+                            });
+                        })
+                        .catch((e) => {
+                            console.error('Market subscription batch failed:', e.message);
+                        });
                 }
             });
 
@@ -58,6 +143,17 @@ class SocketManager {
 
     getIo() {
         return this.io;
+    }
+
+    /**
+     * Broadcasts a message to all connected clients to re-request their market snapshot.
+     * This is useful when global config like excluded contracts changes.
+     */
+    broadcastMarketSnapshotRefresh() {
+        if (this.io) {
+            console.log('📢 Broadcasting market snapshot refresh to all clients...');
+            this.io.emit('market_snapshot_needed');
+        }
     }
 }
 

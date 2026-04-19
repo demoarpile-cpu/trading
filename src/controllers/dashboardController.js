@@ -1,124 +1,195 @@
 const db = require('../config/db');
-const mockEngine = require('../utils/mockEngine');
-const { getFromCache, saveToCache } = require('../utils/cacheManager');
+const marketDataService = require('../services/MarketDataService');
 
 /**
- * Live M2M Dashboard - Calculates unrealized P/L for all open trades
- * Formula: (Current Price - Entry Price) * Qty
- * Note: Real implementation would fetch 'Current Price' from a live feed/cache.
+ * Live Market Prices (Snapshot)
  */
 const getLiveMarket = async (req, res) => {
     try {
-        // Try cache first (market data is fast changing, so short TTL)
-        const cachedData = await getFromCache('market_prices');
-        if (cachedData) {
-            return res.json(cachedData);
-        }
-    } catch (e) {
-        // Cache failed, continue to get live data
+        const prices = marketDataService.prices;
+        res.json(prices);
+    } catch (err) {
+        console.error('getLiveMarket Error:', err);
+        res.status(500).send('Server Error');
     }
-
-    const prices = mockEngine.getPrices();
-
-    // Save to cache with 30 sec TTL
-    try {
-        await saveToCache('market_prices', prices, 30);
-    } catch (e) {
-        // Cache save failed, but data still sent
-    }
-
-    res.json(prices);
 };
 
+/**
+ * Superadmin Dashboard - Dynamic Implementation
+ * Returns: { clients: [], stats: { buyTurnover, sellTurnover, totalTurnover, activeUsers, profitLoss, brokerage } }
+ */
 const getClientLiveM2M = async (req, res) => {
     try {
-        const userId = req.user.id;
-        const role = req.user.role;
+        const { id: userId, role } = req.user;
 
-        // Try cache first
-        const cacheKey = `m2m_${userId}_${role}`;
-        try {
-            const cachedData = await getFromCache(cacheKey);
-            if (cachedData) {
-                return res.json(cachedData);
-            }
-        } catch (e) {
-            // Cache failed, continue to DB
-        }
-
-        let query = `
-            SELECT t.*, u.username, u.full_name
+        // 1. Fetch all relevant trades (Non-Deleted)
+        // If SUPERADMIN, get all. If ADMIN/BROKER, get their tree or created_by.
+        // For now, mirroring existing logic but expanding for Superadmin.
+        let tradeQuery = `
+            SELECT t.*, u.username, u.full_name, u.role as user_role
             FROM trades t
             JOIN users u ON t.user_id = u.id
-            WHERE t.status = 'OPEN'
+            WHERE t.status != 'DELETED'
         `;
-        let params = [];
+        let tradeParams = [];
 
-        if (role === 'TRADER') {
-            // Traders see M2M of their OWN trades
-            query += ' AND t.user_id = ?';
-            params.push(userId);
+        if (role === 'SUPERADMIN') {
+            // See everything
+        } else if (role === 'ADMIN' || role === 'BROKER') {
+            tradeQuery += ' AND (t.created_by = ? OR t.user_id = ?)';
+            tradeParams.push(userId, userId);
         } else {
-            // Admins/Brokers see M2M ONLY for trades THEY created
-            query += ' AND t.created_by = ?';
-            params.push(userId);
+            tradeQuery += ' AND t.user_id = ?';
+            tradeParams.push(userId);
         }
 
-        const [trades] = await db.execute(query, params);
+        const [trades] = await db.execute(tradeQuery, tradeParams);
 
-        // Mocking M2M calculation (in production, use real-time market data)
-        const m2mData = trades.map(trade => {
-            const mockCurrentPrice = parseFloat(trade.entry_price) + (Math.random() * 10 - 5);
-            const pnl = (mockCurrentPrice - parseFloat(trade.entry_price)) * trade.qty;
-            return {
-                ...trade,
-                current_price: mockCurrentPrice.toFixed(4),
-                live_pnl: pnl.toFixed(4)
-            };
+        // 2. Fetch all users involved if needed (already joined in trades)
+        
+        // 3. Initialize Stats Containers
+        const segments = ['mcx', 'nse', 'options', 'comex', 'forex', 'crypto'];
+        const stats = {
+            buyTurnover: {},
+            sellTurnover: {},
+            totalTurnover: {},
+            activeUsers: {},
+            profitLoss: {},
+            brokerage: {},
+            activeBuy: { mcx: 0, nse: 0, nse_spot: 0, options: 0, comex: 0 },
+            activeSell: { mcx: 0, nse: 0, nse_spot: 0, options: 0, comex: 0 }
+        };
+
+        segments.forEach(s => {
+            stats.buyTurnover[s] = 0;
+            stats.sellTurnover[s] = 0;
+            stats.totalTurnover[s] = 0;
+            stats.activeUsers[s] = new Set();
+            stats.profitLoss[s] = 0;
+            stats.brokerage[s] = 0;
         });
 
-        // Save to cache with 2 min TTL (more frequent updates than user data)
-        try {
-            await saveToCache(cacheKey, m2mData, 120);
-        } catch (e) {
-            // Cache save failed, but data still sent
-        }
+        const clientMap = {}; // userId -> { username, activePL, activeTrades, margin }
 
-        res.json(m2mData);
+        // 4. Process Trades
+        trades.forEach(trade => {
+            const mType = (trade.market_type || 'MCX').toLowerCase();
+            let segment = mType === 'equity' ? 'nse' : mType;
+            
+            // Distinguish NFO Futures vs Options
+            if (mType === 'nfo') {
+                const sym = trade.symbol.toUpperCase();
+                if (sym.endsWith('CE') || sym.endsWith('PE') || /\d{5,}/.test(sym)) {
+                    segment = 'options';
+                } else {
+                    segment = 'nse';
+                }
+            }
+
+            const isBuy = trade.type === 'BUY';
+            const qty = Math.abs(trade.qty);
+            const entryPrice = parseFloat(trade.entry_price || 0);
+            const tradeValue = entryPrice * qty;
+
+            // Turnover (Total value of entries)
+            if (isBuy) {
+                stats.buyTurnover[segment] = (stats.buyTurnover[segment] || 0) + tradeValue;
+            } else {
+                stats.sellTurnover[segment] = (stats.sellTurnover[segment] || 0) + tradeValue;
+            }
+            stats.totalTurnover[segment] = (stats.totalTurnover[segment] || 0) + tradeValue;
+
+            // Brokerage
+            stats.brokerage[segment] = (stats.brokerage[segment] || 0) + parseFloat(trade.brokerage || 0);
+
+            // Profit / Loss (Realized)
+            if (trade.status === 'CLOSED') {
+                stats.profitLoss[segment] = (stats.profitLoss[segment] || 0) + parseFloat(trade.pnl || 0);
+            }
+
+            // Active Data (OPEN trades)
+            if (trade.status === 'OPEN') {
+                stats.activeUsers[segment].add(trade.user_id);
+                
+                // Active Buy/Sell counts
+                if (isBuy) stats.activeBuy[segment] = (stats.activeBuy[segment] || 0) + 1;
+                else stats.activeSell[segment] = (stats.activeSell[segment] || 0) + 1;
+
+                // Calculate Unrealized P/L
+                const marketTypeUpper = (trade.market_type || 'MCX').toUpperCase();
+                const priceKey = `${marketTypeUpper}:${trade.symbol}`;
+                const liveData = marketDataService.getPrice(priceKey);
+                const currentPrice = liveData ? liveData.ltp : entryPrice;
+                
+                const unrealizedPnl = isBuy 
+                    ? (currentPrice - entryPrice) * qty 
+                    : (entryPrice - currentPrice) * qty;
+
+                stats.profitLoss[segment] = (stats.profitLoss[segment] || 0) + unrealizedPnl;
+
+                // Client-wise aggregation
+                if (!clientMap[trade.user_id]) {
+                    clientMap[trade.user_id] = {
+                        id: trade.user_id,
+                        username: trade.username,
+                        activePL: 0,
+                        activeTrades: 0,
+                        margin: 0
+                    };
+                }
+                clientMap[trade.user_id].activePL += unrealizedPnl;
+                clientMap[trade.user_id].activeTrades += 1;
+                clientMap[trade.user_id].margin += parseFloat(trade.margin_used || 0);
+            }
+        });
+
+        // 5. Finalize Stats Structure
+        const formatValue = (val) => `${(val / 100000).toFixed(2)} Lakhs`;
+        const formatValOnly = (val) => val.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+        const finalizedStats = {
+            buyTurnover: {},
+            sellTurnover: {},
+            totalTurnover: {},
+            activeUsers: {},
+            profitLoss: {},
+            brokerage: {},
+            activeBuy: stats.activeBuy,
+            activeSell: stats.activeSell
+        };
+
+        segments.forEach(s => {
+            finalizedStats.buyTurnover[s] = formatValue(stats.buyTurnover[s]);
+            finalizedStats.sellTurnover[s] = formatValue(stats.sellTurnover[s]);
+            finalizedStats.totalTurnover[s] = formatValue(stats.totalTurnover[s]);
+            finalizedStats.activeUsers[s] = stats.activeUsers[s].size.toString();
+            finalizedStats.profitLoss[s] = formatValOnly(stats.profitLoss[s]);
+            finalizedStats.brokerage[s] = formatValOnly(stats.brokerage[s]);
+        });
+
+        // Specific fix for "NSE Future" vs "NSE Futures" labels in frontend
+        finalizedStats.buyTurnover.nse = finalizedStats.buyTurnover.nse; 
+        
+        const clients = Object.values(clientMap).map(c => ({
+            ...c,
+            activePL: c.activePL.toFixed(2),
+            margin: c.margin.toFixed(2)
+        }));
+
+        res.json({
+            clients,
+            stats: finalizedStats
+        });
+
     } catch (err) {
-        console.error(err);
+        console.error('getClientLiveM2M Error:', err);
         res.status(500).send('Server Error');
     }
 };
 
 const getMarketWatch = async (req, res) => {
     try {
-        // Try cache first
-        const cacheKey = 'market_watch_scrips';
-        try {
-            const cachedData = await getFromCache(cacheKey);
-            if (cachedData) {
-                return res.json(cachedData);
-            }
-        } catch (e) {
-            // Cache failed, continue
-        }
-
-        // In a real app, this would return a list of symbols and their last known prices
-        const scrips = [
-            { symbol: 'GOLD', name: 'Gold Future', expiry: '2026-04-05' },
-            { symbol: 'SILVER', name: 'Silver Future', expiry: '2026-05-05' },
-            { symbol: 'CRUDEOIL', name: 'Crude Oil', expiry: '2026-03-20' },
-            { symbol: 'ALUMINIUM', name: 'Aluminium', expiry: '2026-03-31' }
-        ];
-
-        // Cache for 5 minutes (static data)
-        try {
-            await saveToCache(cacheKey, scrips, 300);
-        } catch (e) {
-            // Cache save failed, but data still sent
-        }
-
+        const [scrips] = await db.execute('SELECT * FROM scrip_data WHERE status = "OPEN"');
         res.json(scrips);
     } catch (err) {
         console.error(err);
@@ -128,28 +199,13 @@ const getMarketWatch = async (req, res) => {
 
 const getIndices = async (req, res) => {
     try {
-        // Try cache first
-        const cacheKey = 'market_indices';
-        try {
-            const cachedData = await getFromCache(cacheKey);
-            if (cachedData) {
-                return res.json(cachedData);
-            }
-        } catch (e) {
-            // Cache failed, continue
-        }
-
+        const nifty = marketDataService.getPrice('NSE:NIFTY 50') || { ltp: 0, change: 0, chg_pct: 0 };
+        const banknifty = marketDataService.getPrice('NSE:NIFTY BANK') || { ltp: 0, change: 0, chg_pct: 0 };
+        
         const indices = [
-            { name: 'NIFTY 50', ltp: '22456.20', change: '-101.30', pct: '-0.45' },
-            { name: 'BANK NIFTY', ltp: '47890.15', change: '57.45', pct: '+0.12' }
+            { name: 'NIFTY 50', ltp: nifty.ltp, change: nifty.change, pct: nifty.chg_pct },
+            { name: 'BANK NIFTY', ltp: banknifty.ltp, change: banknifty.change, pct: banknifty.chg_pct }
         ];
-
-        // Cache for 2 minutes (live market data)
-        try {
-            await saveToCache(cacheKey, indices, 120);
-        } catch (e) {
-            // Cache save failed, but data still sent
-        }
 
         res.json(indices);
     } catch (err) {
@@ -160,38 +216,20 @@ const getIndices = async (req, res) => {
 
 const getWatchlist = async (req, res) => {
     try {
-        // Try cache first
-        const cacheKey = 'watchlist_all';
-        try {
-            const cachedData = await getFromCache(cacheKey);
-            if (cachedData) {
-                return res.json(cachedData);
-            }
-        } catch (e) {
-            // Cache failed, continue
-        }
-
-        const prices = mockEngine.getPrices();
-        const watchlist = Object.keys(prices).map((symbol, index) => ({
-            id: (index + 1).toString(),
-            symbol: symbol,
-            name: symbol,
-            category: symbol.includes('NIFTY') ? 'NSE Futures' : 'MCX Futures',
-            ltp: prices[symbol],
-            bid: (prices[symbol] - 0.5).toFixed(2),
-            ask: (prices[symbol] + 0.5).toFixed(2),
-            high: (prices[symbol] + 10).toFixed(2),
-            low: (prices[symbol] - 10).toFixed(2),
-            change: (Math.random() * 2 - 1).toFixed(2)
-        }));
-
-        // Cache for 1 minute (live market data updates frequently)
-        try {
-            await saveToCache(cacheKey, watchlist, 60);
-        } catch (e) {
-            // Cache save failed, but data still sent
-        }
-
+        const prices = marketDataService.prices;
+        const watchlist = Object.keys(prices).map((symbol, index) => {
+            const data = prices[symbol];
+            return {
+                id: (index + 1).toString(),
+                symbol: symbol,
+                name: symbol.split(':')[1] || symbol,
+                category: data.type || 'NSE',
+                ltp: data.ltp,
+                bid: data.bid,
+                ask: data.ask,
+                change: data.chg_pct || 0
+            };
+        });
         res.json(watchlist);
     } catch (err) {
         console.error(err);
@@ -207,3 +245,4 @@ module.exports = {
     getWatchlist,
     getBrokerM2M: async (req, res) => res.json([])
 };
+

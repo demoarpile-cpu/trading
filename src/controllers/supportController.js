@@ -32,8 +32,8 @@ const createTicket = async (req, res) => {
     try {
         await conn.beginTransaction();
         const [result] = await conn.execute(
-            'INSERT INTO support_tickets (user_id, subject, priority) VALUES (?, ?, ?)',
-            [req.user.id, subject, priority || 'NORMAL']
+            'INSERT INTO support_tickets (user_id, subject, message, priority) VALUES (?, ?, ?, ?)',
+            [req.user.id, subject, message, priority || 'NORMAL']
         );
         const ticketId = result.insertId;
         await conn.execute(

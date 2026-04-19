@@ -2,6 +2,7 @@ const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { logAction } = require('./systemController');
+const { invalidateCache } = require('../utils/cacheManager');
 
 const login = async (req, res) => {
   const username = req.body.username ? req.body.username.trim() : '';
@@ -241,6 +242,22 @@ const createUser = async (req, res) => {
 
         // Log user creation
         await logAction(req.user.id, 'CREATE_USER', 'users', `Created new user: ${username} (ID: ${newUserId}, Role: ${role || 'TRADER'})`);
+
+        // Invalidate caches
+        try {
+            const creatorId = req.user.id;
+            await invalidateCache(`users_${creatorId}_all`);
+            await invalidateCache(`users_${creatorId}_TRADER`);
+            await invalidateCache(`users_${creatorId}_BROKER`);
+            
+            // Also invalidate the explicitly assigned parent's cache if different
+            if (finalParentId && finalParentId !== creatorId) {
+                await invalidateCache(`users_${finalParentId}_all`);
+                await invalidateCache(`users_${finalParentId}_TRADER`);
+                await invalidateCache(`users_${finalParentId}_BROKER`);
+            }
+        } catch (e) {}
+
     } catch (err) {
         if (err.code === 'ER_DUP_ENTRY') {
             return res.status(400).json({ message: 'Username already exists' });
@@ -275,6 +292,11 @@ const changePassword = async (req, res) => {
 };
 
 const verifyTransactionPassword = async (req, res) => {
+    // Bypass for TRADER (Clients in App)
+    if (req.user.role === 'TRADER') {
+        return res.json({ message: 'OK' });
+    }
+
     const { password } = req.body;
     try {
         const [rows] = await db.execute('SELECT transaction_password FROM users WHERE id = ?', [req.user.id]);

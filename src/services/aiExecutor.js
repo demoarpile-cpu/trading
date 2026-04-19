@@ -9,6 +9,7 @@
 
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
+const MarginUtils = require('../utils/MarginUtils');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ROUTE MAP (module → frontend route for redirects)
@@ -172,9 +173,18 @@ const executeWithdraw = async (query, parsed, reqUser) => {
         }
 
         const currentBalance = parseFloat(rows[0].balance || 0);
-        if (currentBalance < amount) {
+
+        // Fetch Open Trades and Config for Margin Check
+        const [trades] = await connection.execute('SELECT * FROM trades WHERE user_id = ? AND status = "OPEN"', [userId]);
+        const [settings] = await connection.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [userId]);
+        const clientConfig = settings.length > 0 ? JSON.parse(settings[0].config_json || '{}') : {};
+
+        const blockedMargin = MarginUtils.calculateTotalRequiredHoldingMargin(trades, clientConfig);
+        const withdrawable = currentBalance - blockedMargin;
+
+        if (amount > withdrawable) {
             await connection.rollback();
-            return buildResponse('error', `Insufficient balance. ${rows[0].full_name || 'User ' + userId} has ₹${currentBalance}`, null, { module: 'funds' });
+            return buildResponse('error', `Insufficient Withdrawable Balance. Required Holding Margin: ₹${blockedMargin.toFixed(2)}, Available to Withdraw: ₹${withdrawable.toFixed(2)}`, null, { module: 'funds' });
         }
 
         const newBalance = currentBalance - amount;

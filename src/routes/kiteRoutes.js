@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const kiteController = require('../controllers/kiteController');
 const kiteService = require('../utils/kiteService');
@@ -36,59 +38,121 @@ router.get('/margins', authMiddleware, kiteController.getMargins);
 //   CURATED MARKET DATA — 3 Tabs: NSE, MCX, NFO
 // ══════════════════════════════════════════════════════════════
 
-// ── Instruments Cache ──
 let instrumentsCache = null;
 let instrumentsCacheTime = 0;
 const CACHE_TTL = 6 * 60 * 60 * 1000;
+let symbolTokenMap = new Map();
+
+// Optimized lookup: exchange -> type -> [instruments]
+let indexedInstruments = {
+    NSE: { STOCKS: [], FUT: [], OPT: [] },
+    NFO: { FUT: [], OPT: [] },
+    MCX: { FUT: [], OPT: [] }
+};
 
 async function getInstrumentsFromCache() {
     const now = Date.now();
     if (instrumentsCache && (now - instrumentsCacheTime) < CACHE_TTL) {
         return instrumentsCache;
     }
-    console.log('Fetching ALL instruments from Kite API...');
+    console.log('⚡ Fetching and INDEXING ALL instruments from Kite API...');
     const instruments = await kiteService.getInstruments();
+
+    // 1. Rebuild basic mapping
+    const newMap = new Map();
+    // 2. Rebuild optimized index
+    const newIndex = {
+        NSE: { STOCKS: [], FUT: [], OPT: [] },
+        NFO: { FUT: [], OPT: [] },
+        MCX: { FUT: [], OPT: [] }
+    };
+
+    instruments.forEach(inst => {
+        const fullKey = `${inst.exchange}:${inst.tradingsymbol}`;
+        newMap.set(fullKey, inst.instrument_token);
+
+        const ex = inst.exchange;
+        const type = inst.instrument_type;
+        if (newIndex[ex]) {
+            if (type === 'EQ' || type === 'STK') {
+                if (ex === 'NSE') newIndex.NSE.STOCKS.push(inst);
+            } else if (type === 'FUT') {
+                newIndex[ex].FUT.push(inst);
+            } else if (type === 'CE' || type === 'PE') {
+                newIndex[ex].OPT.push(inst);
+            }
+        }
+    });
+
+    symbolTokenMap = newMap;
+    indexedInstruments = newIndex;
     instrumentsCache = instruments;
     instrumentsCacheTime = now;
-    console.log(`Cached ${instruments.length} instruments`);
+
+    console.log(`✅ Indexed ${instruments.length} instruments`);
     return instruments;
 }
 
+function getTokenSync(symbol) {
+    return symbolTokenMap.get(symbol);
+}
+
 // ── NIFTY 50 (50 stocks — Apr 2026 official list, Zerodha exact symbols) ──
+/** Bump when default unified watchlist shape changes (invalidates HTTP cache + precompute). */
+const WATCHLIST_CACHE_BUST = 'watchlist_v4_nfo_index_opts';
+
+/** NFO index options included in unified watchlist (instruments + quotes from Kite only). */
+const NFO_INDEX_OPTION_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY']);
+
 const NIFTY50 = [
-    'ADANIPORTS','APOLLOHOSP','ASIANPAINT','AXISBANK','BAJAJ-AUTO',
-    'BAJFINANCE','BAJAJFINSV','BEL','BHARTIARTL','BPCL',
-    'BRITANNIA','CIPLA','COALINDIA','DIVISLAB','DRREDDY',
-    'EICHERMOT','GRASIM','HCLTECH','HDFCBANK','HDFCLIFE',
-    'HEROMOTOCO','HINDALCO','HINDUNILVR','ICICIBANK','INDUSINDBK',
-    'INFY','ITC','JSWSTEEL','KOTAKBANK','LT',
-    'M&M','MARUTI','NESTLEIND','NTPC','ONGC',
-    'POWERGRID','RELIANCE','SBILIFE','SBIN','SHRIRAMFIN',
-    'SUNPHARMA','TATACONSUM','TATAMOTORS','TATASTEEL','TCS',
-    'TECHM','TITAN','TRENT','ULTRACEMCO','WIPRO'
+    'ADANIPORTS', 'APOLLOHOSP', 'ASIANPAINT', 'AXISBANK', 'BAJAJ-AUTO',
+    'BAJFINANCE', 'BAJAJFINSV', 'BEL', 'BHARTIARTL', 'BPCL',
+    'BRITANNIA', 'CIPLA', 'COALINDIA', 'DIVISLAB', 'DRREDDY',
+    'EICHERMOT', 'GRASIM', 'HCLTECH', 'HDFCBANK', 'HDFCLIFE',
+    'HEROMOTOCO', 'HINDALCO', 'HINDUNILVR', 'ICICIBANK', 'INDUSINDBK',
+    'INFY', 'ITC', 'JSWSTEEL', 'KOTAKBANK', 'LT',
+    'M&M', 'MARUTI', 'NESTLEIND', 'NTPC', 'ONGC',
+    'POWERGRID', 'RELIANCE', 'SBILIFE', 'SBIN', 'SHRIRAMFIN',
+    'SUNPHARMA', 'TATACONSUM', 'TATAMOTORS', 'TATASTEEL', 'TCS',
+    'TECHM', 'TITAN', 'TRENT', 'ULTRACEMCO', 'WIPRO'
 ];
+
+let _userNseEquityWatchlist = null;
+function loadUserNseEquityWatchlist() {
+    if (_userNseEquityWatchlist) return _userNseEquityWatchlist;
+    try {
+        const p = path.join(__dirname, '../data/user_nse_equity_watchlist.json');
+        const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (!Array.isArray(raw)) throw new Error('expected array');
+        _userNseEquityWatchlist = raw.map((s) => String(s || '').trim().toUpperCase()).filter(Boolean);
+    } catch (e) {
+        console.warn('user_nse_equity_watchlist.json not loaded, falling back to NIFTY50:', e.message);
+        _userNseEquityWatchlist = NIFTY50.slice();
+    }
+    return _userNseEquityWatchlist;
+}
 
 // ── NIFTY BANK (12 banking stocks) ──
 const BANKNIFTY = [
-    'HDFCBANK','ICICIBANK','SBIN','KOTAKBANK','AXISBANK','INDUSINDBK',
-    'BANKBARODA','PNB','FEDERALBNK','IDFCFIRSTB','BANDHANBNK','AUBANK'
+    'HDFCBANK', 'ICICIBANK', 'SBIN', 'KOTAKBANK', 'AXISBANK', 'INDUSINDBK',
+    'BANKBARODA', 'PNB', 'FEDERALBNK', 'IDFCFIRSTB', 'BANDHANBNK', 'AUBANK'
 ];
 
 // ── NIFTY MIDCAP SELECT (25 stocks — official list, Zerodha exact symbols) ──
 const MIDCAP = [
-    'ABBOTINDIA','ALKEM','AUROPHARMA','CANBK','COFORGE',
-    'COLPAL','CONCOR','CUMMINSIND','DELHIVERY','DIXON',
-    'FEDERALBNK','GODREJPROP','INDHOTEL','IRCTC','JSPL',
-    'JUBLFOOD','LINDEINDIA','LTIM','LUPIN','MAXHEALTH',
-    'OBEROIRLTY','PERSISTENT','PIIND','POLYCAB','VOLTAS'
+    'ABBOTINDIA', 'ALKEM', 'AUROPHARMA', 'CANBK', 'COFORGE',
+    'COLPAL', 'CONCOR', 'CUMMINSIND', 'DELHIVERY', 'DIXON',
+    'FEDERALBNK', 'GODREJPROP', 'INDHOTEL', 'IRCTC', 'JSPL',
+    'JUBLFOOD', 'LINDEINDIA', 'LTIM', 'LUPIN', 'MAXHEALTH',
+    'OBEROIRLTY', 'PERSISTENT', 'PIIND', 'POLYCAB', 'VOLTAS'
 ];
 
 // ── NIFTY FINANCIAL SERVICES (20 stocks) ──
 const FINNIFTY = [
-    'HDFCBANK','ICICIBANK','SBIN','KOTAKBANK','AXISBANK','BAJFINANCE',
-    'BAJAJFINSV','HDFCLIFE','SBILIFE','ICICIPRULI','MUTHOOTFIN','CHOLAFIN',
-    'SHRIRAMFIN','MANAPPURAM','PFC','RECLTD','LICHSGFIN','MFSL',
-    'SBICARD','M&MFIN'
+    'HDFCBANK', 'ICICIBANK', 'SBIN', 'KOTAKBANK', 'AXISBANK', 'BAJFINANCE',
+    'BAJAJFINSV', 'HDFCLIFE', 'SBILIFE', 'ICICIPRULI', 'MUTHOOTFIN', 'CHOLAFIN',
+    'SHRIRAMFIN', 'MANAPPURAM', 'PFC', 'RECLTD', 'LICHSGFIN', 'MFSL',
+    'SBICARD', 'M&MFIN'
 ];
 
 // ── All NSE stocks deduplicated ──
@@ -96,20 +160,20 @@ const ALL_NSE_STOCKS = [...new Set([...NIFTY50, ...BANKNIFTY, ...MIDCAP, ...FINN
 
 // ── MCX commodities (normal + mini combined) ──
 const MCX_BASES = [
-    'GOLD','GOLDM','GOLDPETAL','GOLDGUINEA',
-    'SILVER','SILVERM','SILVERMICRO',
-    'CRUDEOIL','CRUDEOILM',
-    'NATURALGAS','NATGASMINI',
-    'COPPER','COPPERM',
-    'ZINC','ZINCMINI',
-    'LEAD','LEADMINI',
-    'NICKEL','NICKELMINI',
-    'ALUMINIUM','ALUMINI',
-    'MENTHAOIL','COTTON','COTTONCNDY'
+    'GOLD', 'GOLDM', 'GOLDPETAL', 'GOLDGUINEA',
+    'SILVER', 'SILVERM', 'SILVERMICRO',
+    'CRUDEOIL', 'CRUDEOILM',
+    'NATURALGAS', 'NATGASMINI',
+    'COPPER', 'COPPERM',
+    'ZINC', 'ZINCMINI',
+    'LEAD', 'LEADMINI',
+    'NICKEL', 'NICKELMINI',
+    'ALUMINIUM', 'ALUMINI',
+    'MENTHAOIL', 'COTTON', 'COTTONCNDY'
 ];
 
 // ── NFO Index Futures ──
-const NFO_INDICES = ['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY'];
+const NFO_INDICES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'];
 
 // Dashboard symbols cache (avoids rebuilding symbol lists every request)
 let dashboardSymbolsCache = null;
@@ -221,21 +285,20 @@ function formatQuotes(rawQuotes) {
     for (const [symbol, quote] of Object.entries(rawQuotes)) {
         try {
             formatted[symbol] = {
-                symbol,
-                ltp: quote.last_price || 0,
+                symbol: symbol,
+                ltp: quote.last_price,
                 vol: quote.volume || 0,
                 oi: quote.oi || 0,
                 chg: quote.net_change || 0,
-                chg_pct: quote.ohlc?.close ? (((quote.last_price - quote.ohlc.close) / quote.ohlc.close) * 100).toFixed(2) : 0,
                 open: quote.ohlc?.open || 0,
                 high: quote.ohlc?.high || 0,
                 low: quote.ohlc?.low || 0,
                 close: quote.ohlc?.close || 0,
                 bid: quote.depth?.buy?.[0]?.price || 0,
                 ask: quote.depth?.sell?.[0]?.price || 0,
-                time: quote.timestamp || null
+                time: quote.timestamp || "1970-01-01 05:30:00"
             };
-        } catch (e) {}
+        } catch (e) { }
     }
     return formatted;
 }
@@ -287,8 +350,12 @@ function getOptionStrikeStepNfo(underlying) {
 
 const MCX_ALLOWED_WATCHLIST = [
     'GOLD', 'SILVER', 'CRUDEOIL', 'COPPER', 'ZINC', 'ALUMINIUM', 'LEAD', 'NATURALGAS',
-    'GOLDM', 'SILVERM', 'CRUDEOILM', 'ZINCMINI', 'LEADMINI', 'COPPERMINI', 'NATURALGASMINI',
+    'GOLDM', 'SILVERM', 'CRUDEOILM', 'ZINCMINI', 'LEADMINI', 'COPPERM', 'NATURALGASMINI',
+    'ALUMINI',
 ];
+
+/** Unified watchlist: MCX options only for Crude + Natural Gas (incl. mini); other MCX bases = nearest FUT only */
+const MCX_OPTION_UNDERLYINGS_DEFAULT = ['CRUDEOIL', 'CRUDEOILM', 'NATURALGAS', 'NATURALGASMINI'];
 
 const MCX_CANONICAL_MAP = {
     // Project-internal (instrument name) vs requirement names
@@ -301,28 +368,30 @@ function canonicalMcxName(name) {
     return MCX_CANONICAL_MAP[up] || up;
 }
 
-// ── Dynamic symbol builder: picks nearest 2 active expiries per base ──
+// ── Optimized symbol builder: uses INDEXED data for O(1) exchange search ──
 async function buildFutSymbols(exchange, baseNames, maxExpiries = 2) {
     try {
-        const instruments = await getInstrumentsFromCache();
+        await getInstrumentsFromCache(); // Ensure cached/indexed
         const now = new Date();
         const symbols = [];
 
+        // ONLY search in the filtered subset for this exchange/type
+        const relevantContracts = (indexedInstruments[exchange] && indexedInstruments[exchange].FUT) || [];
+        if (relevantContracts.length === 0) return [];
+
         for (const base of baseNames) {
             const baseUpper = base.toUpperCase();
-            // Match by tradingsymbol starting with base name + digits (expiry) + FUT
-            const contracts = instruments
+
+            // This is now scanning ~500-1000 items instead of 100,000 items
+            const matches = relevantContracts
                 .filter(i => {
-                    if (i.exchange !== exchange) return false;
-                    if (i.instrument_type !== 'FUT') return false;
                     const sym = (i.tradingsymbol || '').toUpperCase();
-                    // Match: symbol starts with base and ends with FUT
                     return sym.startsWith(baseUpper) && sym.endsWith('FUT');
                 })
                 .sort((a, b) => new Date(a.expiry || 0) - new Date(b.expiry || 0));
 
             const added = new Set();
-            for (const c of contracts) {
+            for (const c of matches) {
                 if (added.size >= maxExpiries) break;
                 const expDate = new Date(c.expiry || 0);
                 if (expDate >= now) {
@@ -331,10 +400,6 @@ async function buildFutSymbols(exchange, baseNames, maxExpiries = 2) {
                 }
             }
         }
-
-        if (symbols.length === 0) {
-            console.warn(`⚠️  buildFutSymbols ${exchange}: No contracts found for ${baseNames.length} bases`);
-        }
         return symbols;
     } catch (err) {
         console.warn(`buildFutSymbols error for ${exchange}:`, err.message);
@@ -342,196 +407,237 @@ async function buildFutSymbols(exchange, baseNames, maxExpiries = 2) {
     }
 }
 
+// ── Background Rebuilding of Dashboard Symbols ──
+let dashboardSymbolsRefreshing = false;
+async function refreshDashboardSymbols() {
+    if (dashboardSymbolsRefreshing) return;
+    dashboardSymbolsRefreshing = true;
+    try {
+        console.log('🔄 Rebuilding Dashboard Symbols Cache in Background...');
+        const [mcxSymbols, nfoIndexFut, nfoStockFut] = await Promise.all([
+            buildFutSymbols('MCX', MCX_BASES, 6),
+            buildFutSymbols('NFO', NFO_INDICES, 4),
+            buildFutSymbols('NFO', NIFTY50, 1),
+        ]);
+
+        dashboardSymbolsCache = {
+            mcxSymbols,
+            nfoSymbols: [...nfoIndexFut, ...nfoStockFut],
+        };
+        dashboardSymbolsCacheTime = Date.now();
+        console.log('✅ Dashboard Symbols Cache Ready');
+    } catch (err) {
+        console.error('Failed to rebuild dashboard symbols:', err.message);
+    } finally {
+        dashboardSymbolsRefreshing = false;
+    }
+}
+
+// Start background loop
+setInterval(refreshDashboardSymbols, 10 * 60 * 1000); // Rebuild every 10 mins
+// Immediate first run
+setTimeout(refreshDashboardSymbols, 5000);
+
 // Rate limiter
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Spot for NFO index-option strike band: index cash can be delayed/missing while NFO fut still ticks.
+ * Without a positive spot, Step 2 skips the whole chain → NFO tab count swings (e.g. ~53 vs ~800+).
+ */
+function resolveNfoIndexSpotLtp(ltpQuotes, cfg) {
+    const fromQuote = (key) => {
+        if (!key || !ltpQuotes || !ltpQuotes[key]) return 0;
+        const q = ltpQuotes[key];
+        const lp = Number(q.last_price);
+        if (Number.isFinite(lp) && lp > 0) return lp;
+        const oc = Number(q.ohlc?.close);
+        if (Number.isFinite(oc) && oc > 0) return oc;
+        const av = Number(q.average_price);
+        if (Number.isFinite(av) && av > 0) return av;
+        return 0;
+    };
+    let ltp = fromQuote(cfg.idxKey);
+    if (ltp > 0) return ltp;
+    if (cfg.futKey) {
+        ltp = fromQuote(cfg.futKey);
+        if (ltp > 0) return ltp;
+    }
+    return 0;
 }
 
 // ══════════════════════════════════════════════════════════════
 //   3-TAB DASHBOARD: NSE | MCX | NFO
 // ══════════════════════════════════════════════════════════════
 
+/**
+ * Shared dashboard payload (NSE + MCX + NFO tabs) — used by HTTP and Socket.IO.
+ * @returns {Promise<{ status: string, timestamp: string, counts: object, nseGroups: object, data: object, groups: object }>}
+ */
+async function buildKiteDashboardPayload(userId) {
+    if (!kiteService.isAuthenticated() && userId) {
+        try {
+            const status = await kiteAuthService.getStatus(userId);
+            if (status.connected) {
+                const session = await require('../repositories/KiteRepository').getSessionByUserId(userId);
+                if (session?.access_token) {
+                    kiteService.accessToken = session.access_token;
+                    kiteService.sessionData = { access_token: session.access_token, user_name: session.user_name };
+                }
+            }
+        } catch (_) { }
+    }
+
+    if (!kiteService.isAuthenticated()) {
+        const err = new Error('KITE_NOT_CONNECTED');
+        err.kite_disconnected = true;
+        throw err;
+    }
+
+    const marketDataService = require('../services/MarketDataService');
+    marketDataService.init(userId).catch(() => {});
+
+    const instruments = await getInstrumentsFromCache();
+
+    // 1. Basic Symbols (Stocks + Indices)
+    const nseStocks = ALL_NSE_STOCKS.map(s => `NSE:${s}`);
+    const nseIndices = ['NSE:NIFTY 50', 'NSE:NIFTY BANK', 'NSE:NIFTY FIN SERVICE', 'NSE:NIFTY MID SELECT'];
+    
+    // 2. Futures (from background cache)
+    if (!dashboardSymbolsCache) await refreshDashboardSymbols().catch(() => {});
+    const mcxFutSymbols = dashboardSymbolsCache?.mcxSymbols || [];
+    const nfoFutSymbols = dashboardSymbolsCache?.nfoSymbols || [];
+
+    // 3. Dynamic Options (matching Market Watch logic but for all tab visitors)
+    // We fetch current LTP of indices to define ATM range
+    const spotKeys = [...nseIndices, ...mcxFutSymbols];
+    const spotQuotes = await kiteService.getQuote(spotKeys).catch(() => ({}));
+
+    const dynamicOptions = [];
+    
+    // NFO ATM Options (±5 strikes)
+    for (const underlying of NFO_INDEX_OPTION_UNDERLYINGS) {
+        const step = getOptionStrikeStepNfo(underlying);
+        const idxKey = underlying === 'NIFTY' ? 'NSE:NIFTY 50' : underlying === 'BANKNIFTY' ? 'NSE:NIFTY BANK' : 'NSE:NIFTY FIN SERVICE';
+        const ltp = spotQuotes[idxKey]?.last_price || 0;
+        if (!ltp || !step) continue;
+
+        const atm = Math.round(ltp / step) * step;
+        const strikes = [atm - 2 * step, atm - step, atm, atm + step, atm + 2 * step];
+        
+        const nearestOpt = pickNearestExpiry(instruments, { exchange: 'NFO', name: underlying, instrumentTypes: ['CE', 'PE'] });
+        if (!nearestOpt) continue;
+        const expStr = new Date(nearestOpt.expiry).toDateString();
+        
+        const matches = (indexedInstruments['NFO']?.OPT || []).filter(i => 
+            i.name === underlying && 
+            new Date(i.expiry).toDateString() === expStr &&
+            strikes.includes(Number(i.strike))
+        );
+        matches.forEach(m => dynamicOptions.push(`NFO:${m.tradingsymbol}`));
+    }
+
+    // MCX ATM Options (Crude/Natgas)
+    for (const base of ['CRUDEOIL', 'NATURALGAS']) {
+        const futKey = mcxFutSymbols.find(s => s.startsWith(`MCX:${base}`)) || `MCX:${base}FUT`;
+        const ltp = spotQuotes[futKey]?.last_price || 0;
+        if (!ltp) continue;
+        const step = MCX_ALLOWED[base]?.step || 100;
+        const atm = Math.round(ltp / step) * step;
+        const strikes = [atm - step, atm, atm + step];
+        
+        const nearestOpt = pickNearestExpiry(instruments, { exchange: 'MCX', name: base, instrumentTypes: ['CE', 'PE'] });
+        if (!nearestOpt) continue;
+        const expStr = new Date(nearestOpt.expiry).toDateString();
+        
+        const matches = (indexedInstruments['MCX']?.OPT || []).filter(i => 
+            i.name === base && 
+            new Date(i.expiry).toDateString() === expStr &&
+            strikes.includes(Number(i.strike))
+        );
+        matches.forEach(m => dynamicOptions.push(`MCX:${m.tradingsymbol}`));
+    }
+
+    const allSymbols = Array.from(new Set([...nseStocks, ...nseIndices, ...mcxFutSymbols, ...nfoFutSymbols, ...dynamicOptions]));
+
+    // Subscribe to everything
+    const subList = allSymbols.map(sym => ({ symbol: sym, token: getTokenSync(sym) })).filter(i => i.token);
+    marketDataService.bulkSubscribe(subList);
+
+    const streamData = marketDataService.getPricesBatch(allSymbols);
+    const formatted = {};
+
+    for (const symbol of allSymbols) {
+        const quote = streamData[symbol];
+        formatted[symbol] = {
+            symbol,
+            ltp: quote?.ltp || 0,
+            vol: quote?.volume || 0,
+            oi: quote?.oi || 0,
+            chg: quote?.change || 0,
+            chg_pct: quote?.ohlc?.close ? (((quote.ltp - quote.ohlc.close) / quote.ohlc.close) * 100).toFixed(2) : "0.00",
+            open: quote?.ohlc?.open || 0,
+            high: quote?.ohlc?.high || 0,
+            low: quote?.ohlc?.low || 0,
+            close: quote?.ohlc?.close || 0,
+            bid: quote?.depth?.buy?.[0]?.price || 0,
+            ask: quote?.depth?.sell?.[0]?.price || 0,
+            time: new Date().toISOString()
+        };
+    }
+
+    const nseGroups = { 'NIFTY 50': {}, 'BANK NIFTY': {}, 'MIDCAP': {}, 'FIN NIFTY': {}, 'INDICES': {} };
+    const nifty50Set = new Set(NIFTY50.map(s => `NSE:${s}`));
+    const bankNiftySet = new Set(BANKNIFTY.map(s => `NSE:${s}`));
+    const midcapSet = new Set(MIDCAP.map(s => `NSE:${s}`));
+    const finniftySet = new Set(FINNIFTY.map(s => `NSE:${s}`));
+
+    const sections = { nse: {}, mcx: {}, nfo: {} };
+    for (const [sym, data] of Object.entries(formatted)) {
+        if (sym.startsWith('NSE:')) {
+            sections.nse[sym] = data;
+            if (nseIndices.includes(sym)) nseGroups['INDICES'][sym] = data;
+            if (nifty50Set.has(sym)) nseGroups['NIFTY 50'][sym] = data;
+            if (bankNiftySet.has(sym)) nseGroups['BANK NIFTY'][sym] = data;
+            if (midcapSet.has(sym)) nseGroups['MIDCAP'][sym] = data;
+            if (finniftySet.has(sym)) nseGroups['FIN NIFTY'][sym] = data;
+        }
+        else if (sym.startsWith('MCX:')) sections.mcx[sym] = data;
+        else if (sym.startsWith('NFO:')) sections.nfo[sym] = data;
+    }
+
+    return {
+        status: 'success',
+        timestamp: new Date().toISOString(),
+        counts: { nse: Object.keys(sections.nse).length, mcx: Object.keys(sections.mcx).length, nfo: Object.keys(sections.nfo).length, total: allSymbols.length },
+        nseGroups: {
+            'NIFTY 50': Object.keys(nseGroups['NIFTY 50']).length,
+            'BANK NIFTY': Object.keys(nseGroups['BANK NIFTY']).length,
+            'MIDCAP': Object.keys(nseGroups['MIDCAP']).length,
+            'FIN NIFTY': Object.keys(nseGroups['FIN NIFTY']).length,
+        },
+        data: sections,
+        groups: nseGroups
+    };
+}
+
 // ── /market/dashboard — Single call, returns 3 tabs with sub-groups ──
 router.get('/market/dashboard', authMiddleware, asyncHandler(async (req, res) => {
     try {
-        const userId = req.user?.id;
-
-        // Sync per-user token from DB to global kiteService if needed
-        if (!kiteService.isAuthenticated() && userId) {
-            try {
-                const status = await kiteAuthService.getStatus(userId);
-                if (status.connected) {
-                    const session = await require('../repositories/KiteRepository').getSessionByUserId(userId);
-                    if (session?.access_token) {
-                        kiteService.accessToken = session.access_token;
-                        kiteService.sessionData = { access_token: session.access_token, user_name: session.user_name };
-                        console.log('🔗 Synced user Kite token to global kiteService for', session.user_name);
-                    }
-                }
-            } catch (syncErr) {
-                console.warn('Token sync failed:', syncErr.message);
-            }
-        }
-
-        if (!kiteService.isAuthenticated()) {
-            return res.status(503).json({ error: 'Kite not connected.', kite_disconnected: true });
-        }
-
-        // ✅ Initialize MarketDataService for real-time WebSocket updates
-        const marketDataService = require('../services/MarketDataService');
-        marketDataService.init(userId).catch(err => console.log('MarketDataService init background:', err.message));
-
-        // ── NSE: All stocks from all 4 indices (deduplicated) + index symbols ──
-        const nseStocks = ALL_NSE_STOCKS.map(s => `NSE:${s}`);
-        const nseIndices = ['NSE:NIFTY', 'NSE:NIFTYNXT50', 'NSE:NIFTYBANK', 'NSE:NIFTYINFRA', 'NSE:NIFTYPHARMA', 'NSE:NIFTYIT'];
-
-        // ── MCX + NFO symbols (cached for speed) ──
-        const symNow = Date.now();
-        if (!dashboardSymbolsCache || (symNow - dashboardSymbolsCacheTime) > DASHBOARD_SYMBOLS_TTL) {
-            const [mcxSymbols, nfoIndexFut, nfoStockFut] = await Promise.all([
-                buildFutSymbols('MCX', MCX_BASES, 2),
-                buildFutSymbols('NFO', NFO_INDICES, 3),
-                buildFutSymbols('NFO', NIFTY50, 1),
-            ]);
-            dashboardSymbolsCache = {
-                mcxSymbols,
-                nfoSymbols: [...nfoIndexFut, ...nfoStockFut],
-            };
-            dashboardSymbolsCacheTime = symNow;
-        }
-
-        const mcxSymbols = dashboardSymbolsCache.mcxSymbols;
-        const nfoSymbols = dashboardSymbolsCache.nfoSymbols;
-
-        const allSymbols = [...nseStocks, ...nseIndices, ...mcxSymbols, ...nfoSymbols];
-        console.log(`📊 Dashboard Build: NSE ${nseStocks.length + nseIndices.length} | MCX ${mcxSymbols.length} | NFO ${nfoSymbols.length} = ${allSymbols.length} total`);
-        if (mcxSymbols.length === 0) console.warn('⚠️  MCX symbols returned 0 - will use mock data');
-        if (nfoSymbols.length === 0) console.warn('⚠️  NFO symbols returned 0 - will use mock data');
-
-        // Use cache if fresh (serves instantly)
-        const now = Date.now();
-        let rawQuotes;
-        if (Object.keys(quotesCache).length > 0 && (now - quotesCacheTime) < QUOTES_TTL) {
-            rawQuotes = quotesCache;
-        } else {
-            // Stream-cache-first: fill from websocket cache, fetch only missing via REST
-            rawQuotes = {};
-            const missing = [];
-            for (const sym of allSymbols) {
-                const q = getQuoteFromStream(sym);
-                if (q) rawQuotes[sym] = q;
-                else missing.push(sym);
-            }
-
-            if (missing.length > 0) {
-                const fetched = await fetchQuotesBatchDedup(missing);
-                Object.assign(rawQuotes, fetched);
-            }
-
-            quotesCache = rawQuotes;
-            quotesCacheTime = now;
-        }
-
-        const formatted = formatQuotes(rawQuotes);
-
-        // ── Add fallback mock data for missing symbols ──
-        for (const symbol of allSymbols) {
-            if (!formatted[symbol]) {
-                const mockQuote = generateMockQuote(symbol);
-                formatted[symbol] = {
-                    symbol,
-                    ltp: mockQuote.last_price,
-                    vol: mockQuote.volume,
-                    oi: mockQuote.oi,
-                    chg: mockQuote.net_change,
-                    chg_pct: mockQuote.ohlc?.close ? (((mockQuote.last_price - mockQuote.ohlc.close) / mockQuote.ohlc.close) * 100).toFixed(2) : 0,
-                    open: mockQuote.ohlc?.open || 0,
-                    high: mockQuote.ohlc?.high || 0,
-                    low: mockQuote.ohlc?.low || 0,
-                    close: mockQuote.ohlc?.close || 0,
-                    bid: mockQuote.depth?.buy?.[0]?.price || 0,
-                    ask: mockQuote.depth?.sell?.[0]?.price || 0,
-                    time: mockQuote.timestamp || null
-                };
-            }
-        }
-
-        // ── Build NSE sub-groups ──
-        const nifty50Set = new Set(NIFTY50.map(s => `NSE:${s}`));
-        const bankNiftySet = new Set(BANKNIFTY.map(s => `NSE:${s}`));
-        const midcapSet = new Set(MIDCAP.map(s => `NSE:${s}`));
-        const finniftySet = new Set(FINNIFTY.map(s => `NSE:${s}`));
-        const nseSet = new Set([...nseStocks, ...nseIndices]);
-        const mcxSet = new Set(mcxSymbols);
-        const nfoSet = new Set(nfoSymbols);
-
-        const sections = {
-            nse: {},
-            mcx: {},
-            nfo: {}
-        };
-
-        // NSE sub-groups for frontend filtering
-        const nseGroups = {
-            'NIFTY 50': {},
-            'BANK NIFTY': {},
-            'MIDCAP': {},
-            'FIN NIFTY': {},
-            'INDICES': {}
-        };
-
-        for (const [sym, data] of Object.entries(formatted)) {
-            if (nseSet.has(sym)) {
-                sections.nse[sym] = data;
-                // Tag which index group this belongs to
-                if (nseIndices.includes(sym)) nseGroups['INDICES'][sym] = data;
-                if (nifty50Set.has(sym)) nseGroups['NIFTY 50'][sym] = data;
-                if (bankNiftySet.has(sym)) nseGroups['BANK NIFTY'][sym] = data;
-                if (midcapSet.has(sym)) nseGroups['MIDCAP'][sym] = data;
-                if (finniftySet.has(sym)) nseGroups['FIN NIFTY'][sym] = data;
-            }
-            else if (mcxSet.has(sym)) sections.mcx[sym] = data;
-            else if (nfoSet.has(sym)) sections.nfo[sym] = data;
-        }
-
-        // Log summary
-        const realDataCount = Object.keys(rawQuotes).length;
-        const mockDataCount = Object.keys(formatted).length - realDataCount;
-        console.log(`✅ Dashboard Response: Real=${realDataCount} | Mock=${mockDataCount} | Total=${Object.keys(formatted).length}`);
-
-        // Send response immediately (non-blocking)
-        res.json({
-            status: 'success',
-            timestamp: new Date().toISOString(),
-            counts: {
-                nse: Object.keys(sections.nse).length,
-                mcx: Object.keys(sections.mcx).length,
-                nfo: Object.keys(sections.nfo).length,
-                total: Object.keys(formatted).length
-            },
-            nseGroups: {
-                'NIFTY 50': Object.keys(nseGroups['NIFTY 50']).length,
-                'BANK NIFTY': Object.keys(nseGroups['BANK NIFTY']).length,
-                'MIDCAP': Object.keys(nseGroups['MIDCAP']).length,
-                'FIN NIFTY': Object.keys(nseGroups['FIN NIFTY']).length,
-            },
-            // Each stock has a _group tag so frontend can filter
-            data: sections,
-            groups: nseGroups
-        });
-
-        // ✅ DISABLED: Frontend doesn't require subscription anymore
-        // Backend broadcasts to all clients via mock engine
-        // (removed to prevent background process issues)
+        const body = await buildKiteDashboardPayload(req.user?.id);
+        res.json(body);
     } catch (err) {
         console.error('Dashboard error:', err.message);
-        // If token expired (403), clear both global and per-user session
+        if (err.message === 'KITE_NOT_CONNECTED') {
+            return res.status(503).json({ error: 'Kite not connected.', kite_disconnected: true });
+        }
         if (err.message?.includes('403') || err.message?.includes('expired')) {
             kiteService.clearSession();
-            // Also clear per-user DB session if possible
             try {
                 if (req.user?.id) await kiteAuthService.disconnect(req.user.id);
-            } catch (_) {}
+            } catch (_) { }
             return res.status(503).json({ error: 'Kite session expired. Please reconnect.', kite_disconnected: true });
         }
         res.status(500).json({ status: 'error', message: err.message, data: {} });
@@ -547,6 +653,12 @@ let watchlistCache = { data: null, time: 0, key: '' };
 let watchlistRefreshing = false;
 let watchlistLastQuery = null;
 let watchlistLastUserId = null;
+
+// ─── Called by contractController after saving contract selection ───
+function bustWatchlistCache() {
+    watchlistCache = { data: null, time: 0, key: '' };
+    console.log('🔄 Watchlist cache busted (contract selection changed)');
+}
 
 // Auto-refresh loop: keeps cache warm every 2s after first request
 let watchlistAutoRefreshStarted = false;
@@ -566,7 +678,7 @@ async function refreshWatchlistInBackground(queryParams, userId) {
     watchlistRefreshing = true;
     try {
         const rows = await _buildWatchlistData(queryParams, userId);
-        const cacheKey = `${queryParams.nse || ''}_${queryParams.nfoUnderlyings || ''}_${queryParams.mcxOptSymbols || ''}`;
+        const cacheKey = `${queryParams.nse || ''}_${queryParams.nfoUnderlyings || ''}_${queryParams.mcxOptSymbols || ''}_${queryParams.nfoIndexOptRange || ''}_${WATCHLIST_CACHE_BUST}`;
         watchlistCache = { data: rows, time: Date.now(), key: cacheKey };
     } catch (err) {
         console.warn('Watchlist background refresh error:', err.message);
@@ -579,8 +691,12 @@ async function refreshWatchlistInBackground(queryParams, userId) {
 // INSTANT response from cache, background refresh every 2s
 router.get('/market/watchlist', authMiddleware, asyncHandler(async (req, res) => {
     try {
-        const now = Date.now();
-        const cacheKey = `${req.query.nse || ''}_${req.query.nfoUnderlyings || ''}_${req.query.mcxOptSymbols || ''}`;
+        if (!kiteService.isAuthenticated()) {
+            return res.status(503).json({ error: 'Kite not connected.', kite_disconnected: true });
+        }
+
+        const configVer = global.WATCHLIST_CONFIG_VERSION || 0;
+        const cacheKey = `${req.query.nse || ''}_${req.query.nfoUnderlyings || ''}_${req.query.mcxOptSymbols || ''}_${req.query.nfoIndexOptRange || ''}_${WATCHLIST_CACHE_BUST}_v${configVer}`;
 
         // If cache has data → return INSTANTLY, trigger background refresh if stale
         if (watchlistCache.data && watchlistCache.key === cacheKey) {
@@ -601,7 +717,7 @@ router.get('/market/watchlist', authMiddleware, asyncHandler(async (req, res) =>
         console.error('Unified watchlist error:', err.message);
         if (err.message?.includes('403') || err.message?.includes('expired')) {
             kiteService.clearSession();
-            try { if (req.user?.id) await kiteAuthService.disconnect(req.user.id); } catch (_) {}
+            try { if (req.user?.id) await kiteAuthService.disconnect(req.user.id); } catch (_) { }
             return res.status(503).json({ error: 'Kite session expired. Please reconnect.', kite_disconnected: true });
         }
         res.status(500).json({ status: 'error', message: err.message });
@@ -612,30 +728,50 @@ router.get('/market/watchlist', authMiddleware, asyncHandler(async (req, res) =>
 //   OPTIMIZED WATCHLIST BUILD — precomputed symbols, single batch, parallel
 // ══════════════════════════════════════════════════════════════
 
-// Precomputed symbol map — rebuilt only when instruments cache changes
+// Precomputed symbol map — rebuilt when instruments cache or default NSE list signature changes
 let _precomputed = null;
 let _precomputedInstrTime = 0;
+let _precomputedQuerySig = '';
 
 function _getPrecomputed(instruments, query) {
-    // Rebuild only if instruments cache changed (every 6 hours)
-    if (_precomputed && _precomputedInstrTime === instrumentsCacheTime) {
+    const today = new Date();
+
+    // ── NSE (default = curated list from user paste, validated against live NSE EQ/BE) ──
+    const nseList = String(query.nse || '').trim();
+    const rawNse = nseList
+        ? nseList.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+        : loadUserNseEquityWatchlist();
+    const nseEqSyms = new Set(
+        instruments
+            .filter((i) => i.exchange === 'NSE' && ['EQ', 'BE'].includes(String(i.instrument_type || '').toUpperCase()))
+            .map((i) => i.tradingsymbol)
+    );
+    let nseSymbols = [...new Set(rawNse.filter((s) => nseEqSyms.has(s)))].sort((a, b) => a.localeCompare(b));
+    if (nseSymbols.length === 0) {
+        nseSymbols = [...new Set(NIFTY50.filter((s) => nseEqSyms.has(s)))].sort((a, b) => a.localeCompare(b));
+        if (nseSymbols.length === 0) nseSymbols = NIFTY50.slice();
+    }
+    const mcxOptSymQuery = String(query.mcxOptSymbols || '').trim();
+    const mcxOptRequested = (mcxOptSymQuery
+        ? mcxOptSymQuery.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+        : MCX_OPTION_UNDERLYINGS_DEFAULT.slice()
+    ).filter((s) => MCX_ALLOWED_WATCHLIST.includes(s));
+    const mcxOptSigForPrecompute = mcxOptSymQuery || MCX_OPTION_UNDERLYINGS_DEFAULT.join(',');
+    const mcxOptRange = parseInt(query.mcxOptRange) || 2000;
+    const querySig = `${nseList || '__DEFAULT__'}_${WATCHLIST_CACHE_BUST}_nse${nseSymbols.length}_mcxopt_${mcxOptSigForPrecompute}`;
+
+    if (_precomputed && _precomputedInstrTime === instrumentsCacheTime && _precomputedQuerySig === querySig) {
         return _precomputed;
     }
 
     console.log('⚡ Precomputing watchlist symbol map...');
-    const today = new Date();
 
-    // ── NSE ──
-    const nseList = String(query.nse || '').trim();
-    const nseSymbols = nseList
-        ? nseList.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
-        : NIFTY50.slice();
-    const nseKeys = nseSymbols.map(s => `NSE:${s}`);
+    const nseKeys = nseSymbols.map((s) => `NSE:${s}`);
 
     // ── NFO underlyings ──
-    const nfoUnderlyings = String(query.nfoUnderlyings || 'NIFTY,BANKNIFTY')
+    const nfoUnderlyings = String(query.nfoUnderlyings || `NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY,${NIFTY50.join(',')}`)
         .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
-    const nfoRange = parseInt(query.nfoRange) || 1000;
+    const nfoRange = parseInt(query.nfoRange) || 50000; // Increased default range to effectively show all strikes
 
     const indexSymbolMap = {
         NIFTY: 'NSE:NIFTY 50', BANKNIFTY: 'NSE:NIFTY BANK',
@@ -645,22 +781,26 @@ function _getPrecomputed(instruments, query) {
     // Collect LTP keys needed for ATM calculation
     const ltpKeys = [];
     const nfoConfig = [];
+    const nfoFutKeys = [];
+    const nfoFutMeta = {};
     for (const u of nfoUnderlyings) {
         const step = getOptionStrikeStepNfo(u);
-        if (!step) continue;
         const idxKey = indexSymbolMap[u] || `NSE:${u}`;
         ltpKeys.push(idxKey);
         const fut = pickNearestExpiry(instruments, { exchange: 'NFO', name: u, instrumentTypes: ['FUT'] });
-        if (fut?.tradingsymbol) ltpKeys.push(`NFO:${fut.tradingsymbol}`);
+        let futKey = null;
+        if (fut?.tradingsymbol) {
+            futKey = `NFO:${fut.tradingsymbol}`;
+            ltpKeys.push(futKey);
+            nfoFutKeys.push(futKey);
+            nfoFutMeta[futKey] = { expiry: toYmd(fut.expiry) };
+        }
         const nearestOpt = pickNearestExpiry(instruments, { exchange: 'NFO', name: u, instrumentTypes: ['CE', 'PE'] });
-        nfoConfig.push({ underlying: u, step, idxKey, futKey: fut ? `NFO:${fut.tradingsymbol}` : null, expiry: nearestOpt ? toYmd(nearestOpt.expiry) : null, range: nfoRange });
+        nfoConfig.push({ underlying: u, step, idxKey, futKey, expiry: nearestOpt ? toYmd(nearestOpt.expiry) : null, range: nfoRange });
     }
 
     // ── MCX precompute: find nearest FUT for each base ONCE ──
     const mcxFutBases = MCX_ALLOWED_WATCHLIST.map(canonicalMcxName);
-    const mcxOptRequested = String(query.mcxOptSymbols || MCX_ALLOWED_WATCHLIST.join(','))
-        .split(',').map(s => s.trim().toUpperCase()).filter(Boolean).filter(s => MCX_ALLOWED_WATCHLIST.includes(s));
-    const mcxOptRange = parseInt(query.mcxOptRange) || 2000;
 
     // Build MCX FUT lookup ONCE (avoid scanning 100K instruments per base)
     const mcxFutByBase = {}; // base → { tradingsymbol, expiry, fullKey }
@@ -699,8 +839,9 @@ function _getPrecomputed(instruments, query) {
         }
     }
 
-    _precomputed = { nseKeys, nfoConfig, mcxFutBases, mcxFutByBase, mcxOptRequested, mcxOptRange, ltpKeys, nfoOptIndex, mcxOptIndex, indexSymbolMap };
+    _precomputed = { nseKeys, nfoConfig, nfoFutKeys, nfoFutMeta, mcxFutBases, mcxFutByBase, mcxOptRequested, mcxOptRange, ltpKeys, nfoOptIndex, mcxOptIndex, indexSymbolMap };
     _precomputedInstrTime = instrumentsCacheTime;
+    _precomputedQuerySig = querySig;
     console.log(`⚡ Precomputed: NSE=${nseKeys.length} | NFO underlyings=${nfoConfig.length} | MCX bases=${mcxFutBases.length} | LTP keys=${ltpKeys.length}`);
     return _precomputed;
 }
@@ -717,7 +858,7 @@ async function _buildWatchlistData(query, userId) {
                     kiteService.sessionData = { access_token: session.access_token, user_name: session.user_name };
                 }
             }
-        } catch (_) {}
+        } catch (_) { }
     }
 
     if (!kiteService.isAuthenticated()) {
@@ -730,26 +871,27 @@ async function _buildWatchlistData(query, userId) {
     // ── Step 1: ONE batch call for all LTP keys (index + futures) ──
     let ltpQuotes = {};
     if (pc.ltpKeys.length > 0) {
-        try { ltpQuotes = await kiteService.getQuote(pc.ltpKeys); } catch (_) {}
+        try { ltpQuotes = await kiteService.getQuote(pc.ltpKeys); } catch (_) { }
     }
 
-    // ── Step 2: Build NFO option keys using precomputed index + LTP ──
-    const nfoOptionKeys = [];
-    const nfoOptionMeta = {};
-
+    // ── Step 2: NFO index options ──
+    const nfoIndexOptRange = parseInt(query.nfoIndexOptRange, 10);
+    const nfoOptRangePts = Number.isFinite(nfoIndexOptRange) && nfoIndexOptRange > 0 ? nfoIndexOptRange : 5000;
+    const nfoOptKeys = [];
+    const nfoOptMeta = {};
     for (const cfg of pc.nfoConfig) {
-        if (!cfg.expiry) continue;
-        let ltp = ltpQuotes?.[cfg.idxKey]?.last_price || 0;
-        if (!ltp && cfg.futKey) ltp = ltpQuotes?.[cfg.futKey]?.last_price || 0;
+        if (!NFO_INDEX_OPTION_UNDERLYINGS.has(String(cfg.underlying || '').toUpperCase())) continue;
+        const step = getOptionStrikeStepNfo(cfg.underlying);
+        if (!step) continue;
+        const ltp = resolveNfoIndexSpotLtp(ltpQuotes, cfg);
         if (!ltp) continue;
-
-        const atmStrike = Math.round(ltp / cfg.step) * cfg.step;
-        const lower = Math.floor((ltp - cfg.range) / cfg.step) * cfg.step;
-        const upper = Math.ceil((ltp + cfg.range) / cfg.step) * cfg.step;
+        const expiryYmd = cfg.expiry;
+        if (!expiryYmd) continue;
+        const requestedExpiry = new Date(expiryYmd).toDateString();
+        const lowerBound = Math.floor((ltp - nfoOptRangePts) / step) * step;
+        const upperBound = Math.ceil((ltp + nfoOptRangePts) / step) * step;
         const strikeSet = new Set();
-        for (let s = lower; s <= upper; s += cfg.step) strikeSet.add(s);
-
-        const requestedExpiry = new Date(cfg.expiry).toDateString();
+        for (let s = lowerBound; s <= upperBound; s += step) strikeSet.add(s);
         const optList = pc.nfoOptIndex[cfg.underlying] || [];
         for (const inst of optList) {
             if (new Date(inst.expiry || 0).toDateString() !== requestedExpiry) continue;
@@ -757,8 +899,8 @@ async function _buildWatchlistData(query, userId) {
             if (!strikeSet.has(strike)) continue;
             const fullKey = `NFO:${inst.tradingsymbol}`;
             const it = String(inst.instrument_type || '').toUpperCase();
-            nfoOptionKeys.push(fullKey);
-            nfoOptionMeta[fullKey] = { strike, optionType: it, expiry: cfg.expiry, underlying: cfg.underlying, isATM: strike === atmStrike };
+            nfoOptKeys.push(fullKey);
+            nfoOptMeta[fullKey] = { strike, optionType: it, expiry: expiryYmd };
         }
     }
 
@@ -772,68 +914,50 @@ async function _buildWatchlistData(query, userId) {
         mcxFutMeta[f.fullKey] = { expiry: toYmd(f.expiry) };
     }
 
-    // ── Step 4: MCX Options using precomputed index + LTP from step 1 ──
+    // ── Step 4: MCX Options ──
     const mcxOptKeys = [];
     const mcxOptMeta = {};
-
     for (const reqName of pc.mcxOptRequested) {
         const base = canonicalMcxName(reqName);
         const step = MCX_ALLOWED[base]?.step || 10;
         const fut = pc.mcxFutByBase[base];
         if (!fut) continue;
-
         const ltp = ltpQuotes?.[fut.fullKey]?.last_price || 0;
-        if (!ltp) continue;
-
         const nearestOpt = pickNearestExpiry(instruments, { exchange: 'MCX', name: base, instrumentTypes: ['CE', 'PE'] });
         if (!nearestOpt) continue;
         const expiryYmd = toYmd(nearestOpt.expiry);
         if (!expiryYmd) continue;
-
-        const atmStrike = Math.round(ltp / step) * step;
-        const lower = Math.floor((ltp - pc.mcxOptRange) / step) * step;
-        const upper = Math.ceil((ltp + pc.mcxOptRange) / step) * step;
-        const strikeSet = new Set();
-        for (let s = lower; s <= upper; s += step) strikeSet.add(s);
-
         const requestedExpiry = new Date(expiryYmd).toDateString();
         const optList = pc.mcxOptIndex[base] || [];
         for (const inst of optList) {
             if (new Date(inst.expiry || 0).toDateString() !== requestedExpiry) continue;
             const strike = Number(inst.strike);
-            if (!strikeSet.has(strike)) continue;
             const fullKey = `MCX:${inst.tradingsymbol}`;
             const it = String(inst.instrument_type || '').toUpperCase();
             mcxOptKeys.push(fullKey);
-            mcxOptMeta[fullKey] = { strike, optionType: it, expiry: expiryYmd, base, isATM: strike === atmStrike };
+            mcxOptMeta[fullKey] = { strike, optionType: it, expiry: expiryYmd, base };
         }
     }
 
-    // ── Step 5: ONE batch quote fetch for ALL symbols (parallel chunks) ──
-    const allKeys = [...pc.nseKeys, ...nfoOptionKeys, ...mcxFutKeys, ...mcxOptKeys];
+    // ── Step 5: ONE batch quote fetch for ALL symbols ──
+    const allKeys = [...pc.nseKeys, ...pc.nfoFutKeys, ...nfoOptKeys, ...mcxFutKeys, ...mcxOptKeys];
     const uniqueKeys = Array.from(new Set(allKeys));
-
-    // Parallel batch: split into 500-symbol chunks, fetch simultaneously
     const rawQuotes = {};
     const chunks = [];
-    for (let i = 0; i < uniqueKeys.length; i += 500) {
-        chunks.push(uniqueKeys.slice(i, i + 500));
-    }
-    const results = await Promise.all(chunks.map(chunk =>
-        kiteService.getQuote(chunk).catch(() => ({}))
-    ));
-    for (const r of results) {
-        if (r && typeof r === 'object') Object.assign(rawQuotes, r);
-    }
+    for (let i = 0; i < uniqueKeys.length; i += 500) chunks.push(uniqueKeys.slice(i, i + 500));
+    const results = await Promise.all(chunks.map(chunk => kiteService.getQuote(chunk).catch(() => ({}))));
+    for (const r of results) if (r && typeof r === 'object') Object.assign(rawQuotes, r);
 
-    // ── Step 6: Build rows ──
-    const rows = [];
-    for (const key of pc.nseKeys) {
-        rows.push(buildUnifiedRow({ type: 'NSE', symbol: key, quote: rawQuotes[key] }));
+    // ── Step 6: Build all rows ──
+    let rows = [];
+    for (const key of pc.nseKeys) rows.push(buildUnifiedRow({ type: 'NSE', symbol: key, quote: rawQuotes[key] }));
+    for (const key of pc.nfoFutKeys) {
+        const m = pc.nfoFutMeta[key] || {};
+        rows.push(buildUnifiedRow({ type: 'FUT', symbol: key, expiry: m.expiry, quote: rawQuotes[key] }));
     }
-    for (const key of nfoOptionKeys) {
-        const m = nfoOptionMeta[key] || {};
-        rows.push(buildUnifiedRow({ type: 'OPTION', symbol: key, strike: m.strike, optionType: m.optionType, expiry: m.expiry, quote: rawQuotes[key] }));
+    for (const key of nfoOptKeys) {
+        const m = nfoOptMeta[key] || {};
+        rows.push(buildUnifiedRow({ type: 'NFO_OPT', symbol: key, strike: m.strike, optionType: m.optionType, expiry: m.expiry, quote: rawQuotes[key] }));
     }
     for (const key of mcxFutKeys) {
         const m = mcxFutMeta[key] || {};
@@ -844,13 +968,14 @@ async function _buildWatchlistData(query, userId) {
         rows.push(buildUnifiedRow({ type: 'MCX_OPT', symbol: key, strike: m.strike, optionType: m.optionType, expiry: m.expiry, quote: rawQuotes[key] }));
     }
 
-    // ── Step 7: Push via WebSocket ──
+    // ── Step 7: Gather Contract Management Exclusions (Visibility decided by frontend) ──
+    const excluded = global.EXCLUDED_CONTRACTS || [];
+
+    // ── Step 8: Push via WebSocket ──
     const io = require('../websocket/SocketManager').getIo();
     if (io) {
         const wsPayload = {};
-        for (const row of rows) {
-            wsPayload[row.symbol] = row;
-        }
+        for (const row of rows) wsPayload[row.symbol] = row;
         io.emit('price_update', wsPayload);
     }
 
@@ -863,11 +988,11 @@ async function _buildWatchlistData(query, userId) {
 
 // Strike step sizes per index (how far apart each strike is)
 const STRIKE_STEPS = {
-    NIFTY:      50,
-    BANKNIFTY:  100,
-    FINNIFTY:   50,
+    NIFTY: 50,
+    BANKNIFTY: 100,
+    FINNIFTY: 50,
     MIDCPNIFTY: 25,
-    SENSEX:     100,
+    SENSEX: 100,
 };
 
 // Options chain cache — per-key TTL, separate from dashboard cache
@@ -883,7 +1008,7 @@ router.get('/market/options-chain', authMiddleware, asyncHandler(async (req, res
 
         // ── 1. Parse & validate query params ──
         const symbol = (req.query.symbol || '').toUpperCase();
-        const range  = parseInt(req.query.range) || 1000;
+        const range = parseInt(req.query.range) || 1000;
         const expiry = req.query.expiry || '';  // e.g. "2026-04-24"
 
         if (!symbol) {
@@ -911,11 +1036,11 @@ router.get('/market/options-chain', authMiddleware, asyncHandler(async (req, res
         // ── 3. Get current LTP of the underlying index ──
         //    NIFTY → NSE:NIFTY 50, BANKNIFTY → NSE:NIFTY BANK
         const indexSymbolMap = {
-            NIFTY:      'NSE:NIFTY 50',
-            BANKNIFTY:  'NSE:NIFTY BANK',
-            FINNIFTY:   'NSE:NIFTY FIN SERVICE',
+            NIFTY: 'NSE:NIFTY 50',
+            BANKNIFTY: 'NSE:NIFTY BANK',
+            FINNIFTY: 'NSE:NIFTY FIN SERVICE',
             MIDCPNIFTY: 'NSE:NIFTY MID SELECT',
-            SENSEX:     'BSE:SENSEX',
+            SENSEX: 'BSE:SENSEX',
         };
 
         const indexKey = indexSymbolMap[symbol] || `NSE:${symbol}`;
@@ -942,7 +1067,7 @@ router.get('/market/options-chain', authMiddleware, asyncHandler(async (req, res
                     const futResult = await kiteService.getQuote([futKey]);
                     ltp = futResult?.[futKey]?.last_price || 0;
                 }
-            } catch (_) {}
+            } catch (_) { }
         }
 
         if (!ltp) {
@@ -1055,36 +1180,36 @@ router.get('/market/options-chain', authMiddleware, asyncHandler(async (req, res
                 CE: ceQuote ? {
                     tradingsymbol: ceInst.tradingsymbol,
                     token: ceInst.instrument_token,
-                    ltp:    ceQuote.last_price || 0,
-                    oi:     ceQuote.oi || 0,
+                    ltp: ceQuote.last_price || 0,
+                    oi: ceQuote.oi || 0,
                     volume: ceQuote.volume || 0,
-                    chg:    ceQuote.net_change || 0,
+                    chg: ceQuote.net_change || 0,
                     chg_pct: ceQuote.ohlc?.close
                         ? (((ceQuote.last_price - ceQuote.ohlc.close) / ceQuote.ohlc.close) * 100).toFixed(2)
                         : '0.00',
-                    bid:    ceQuote.depth?.buy?.[0]?.price || 0,
-                    ask:    ceQuote.depth?.sell?.[0]?.price || 0,
-                    open:   ceQuote.ohlc?.open || 0,
-                    high:   ceQuote.ohlc?.high || 0,
-                    low:    ceQuote.ohlc?.low || 0,
-                    close:  ceQuote.ohlc?.close || 0,
+                    bid: ceQuote.depth?.buy?.[0]?.price || 0,
+                    ask: ceQuote.depth?.sell?.[0]?.price || 0,
+                    open: ceQuote.ohlc?.open || 0,
+                    high: ceQuote.ohlc?.high || 0,
+                    low: ceQuote.ohlc?.low || 0,
+                    close: ceQuote.ohlc?.close || 0,
                 } : null,
                 PE: peQuote ? {
                     tradingsymbol: peInst.tradingsymbol,
                     token: peInst.instrument_token,
-                    ltp:    peQuote.last_price || 0,
-                    oi:     peQuote.oi || 0,
+                    ltp: peQuote.last_price || 0,
+                    oi: peQuote.oi || 0,
                     volume: peQuote.volume || 0,
-                    chg:    peQuote.net_change || 0,
+                    chg: peQuote.net_change || 0,
                     chg_pct: peQuote.ohlc?.close
                         ? (((peQuote.last_price - peQuote.ohlc.close) / peQuote.ohlc.close) * 100).toFixed(2)
                         : '0.00',
-                    bid:    peQuote.depth?.buy?.[0]?.price || 0,
-                    ask:    peQuote.depth?.sell?.[0]?.price || 0,
-                    open:   peQuote.ohlc?.open || 0,
-                    high:   peQuote.ohlc?.high || 0,
-                    low:    peQuote.ohlc?.low || 0,
-                    close:  peQuote.ohlc?.close || 0,
+                    bid: peQuote.depth?.buy?.[0]?.price || 0,
+                    ask: peQuote.depth?.sell?.[0]?.price || 0,
+                    open: peQuote.ohlc?.open || 0,
+                    high: peQuote.ohlc?.high || 0,
+                    low: peQuote.ohlc?.low || 0,
+                    close: peQuote.ohlc?.close || 0,
                 } : null,
             });
         }
@@ -1124,23 +1249,23 @@ router.get('/market/options-chain', authMiddleware, asyncHandler(async (req, res
 // STRICT allowed MCX symbols — nothing else gets through
 const MCX_ALLOWED = {
     // Main contracts
-    GOLD:           { step: 100, label: 'Gold' },
-    SILVER:         { step: 500, label: 'Silver' },
-    CRUDEOIL:       { step: 50,  label: 'Crude Oil' },
-    COPPER:         { step: 5,   label: 'Copper' },
-    ZINC:           { step: 5,   label: 'Zinc' },
-    ALUMINIUM:      { step: 5,   label: 'Aluminium' },
-    LEAD:           { step: 5,   label: 'Lead' },
-    NATURALGAS:     { step: 10,  label: 'Natural Gas' },
+    GOLD: { step: 100, label: 'Gold' },
+    SILVER: { step: 500, label: 'Silver' },
+    CRUDEOIL: { step: 50, label: 'Crude Oil' },
+    COPPER: { step: 5, label: 'Copper' },
+    ZINC: { step: 5, label: 'Zinc' },
+    ALUMINIUM: { step: 5, label: 'Aluminium' },
+    LEAD: { step: 5, label: 'Lead' },
+    NATURALGAS: { step: 10, label: 'Natural Gas' },
     // Mini contracts
-    GOLDM:          { step: 100, label: 'Gold Mini' },
-    SILVERM:        { step: 500, label: 'Silver Mini' },
-    CRUDEOILM:      { step: 50,  label: 'Crude Oil Mini' },
-    ZINCMINI:       { step: 5,   label: 'Zinc Mini' },
-    ALUMINI:        { step: 5,   label: 'Aluminium Mini' },
-    LEADMINI:       { step: 5,   label: 'Lead Mini' },
-    COPPERM:        { step: 5,   label: 'Copper Mini' },
-    NATGASMINI:     { step: 10,  label: 'Natural Gas Mini' },
+    GOLDM: { step: 100, label: 'Gold Mini' },
+    SILVERM: { step: 500, label: 'Silver Mini' },
+    CRUDEOILM: { step: 50, label: 'Crude Oil Mini' },
+    ZINCMINI: { step: 5, label: 'Zinc Mini' },
+    ALUMINI: { step: 5, label: 'Aluminium Mini' },
+    LEADMINI: { step: 5, label: 'Lead Mini' },
+    COPPERM: { step: 5, label: 'Copper Mini' },
+    NATGASMINI: { step: 10, label: 'Natural Gas Mini' },
 };
 
 const MCX_MAIN = ['GOLD', 'SILVER', 'CRUDEOIL', 'COPPER', 'ZINC', 'ALUMINIUM', 'LEAD', 'NATURALGAS'];
@@ -1168,19 +1293,19 @@ async function fetchFreshQuotes(symbols) {
 function formatMcxQuote(quote) {
     if (!quote) return null;
     return {
-        ltp:    quote.last_price || 0,
-        bid:    quote.depth?.buy?.[0]?.price || 0,
-        ask:    quote.depth?.sell?.[0]?.price || 0,
-        oi:     quote.oi || 0,
+        ltp: quote.last_price || 0,
+        bid: quote.depth?.buy?.[0]?.price || 0,
+        ask: quote.depth?.sell?.[0]?.price || 0,
+        oi: quote.oi || 0,
         volume: quote.volume || 0,
-        chg:    quote.net_change || 0,
+        chg: quote.net_change || 0,
         chg_pct: quote.ohlc?.close
             ? (((quote.last_price - quote.ohlc.close) / quote.ohlc.close) * 100).toFixed(2)
             : '0.00',
-        open:   quote.ohlc?.open || 0,
-        high:   quote.ohlc?.high || 0,
-        low:    quote.ohlc?.low || 0,
-        close:  quote.ohlc?.close || 0,
+        open: quote.ohlc?.open || 0,
+        high: quote.ohlc?.high || 0,
+        low: quote.ohlc?.low || 0,
+        close: quote.ohlc?.close || 0,
     };
 }
 
@@ -1275,7 +1400,7 @@ router.get('/market/mcx-options', authMiddleware, asyncHandler(async (req, res) 
 
         const symbol = (req.query.symbol || '').toUpperCase();
         const expiry = req.query.expiry || '';
-        const range  = parseInt(req.query.range) || 2000;
+        const range = parseInt(req.query.range) || 2000;
 
         if (!symbol || !MCX_ALLOWED[symbol]) {
             return res.status(400).json({ error: `Invalid symbol. Allowed: ${MCX_ALL_SYMBOLS.join(', ')}` });
@@ -1496,9 +1621,16 @@ router.get('/market/search', authMiddleware, asyncHandler(async (req, res) => {
     const instruments = await getInstrumentsFromCache();
     const query = q.toUpperCase();
     const results = instruments
-        .filter(i => i.tradingsymbol?.toUpperCase().includes(query) || i.name?.toUpperCase().includes(query))
-        .slice(0, 30)
-        .map(i => ({ symbol: i.tradingsymbol, exchange: i.exchange, name: i.name || '', type: i.instrument_type || '', expiry: i.expiry || '' }));
+        .filter(i => i.tradingsymbol?.toUpperCase().startsWith(query) || i.name?.toUpperCase().startsWith(query))
+        .slice(0, 100)
+        .map(i => ({
+            symbol: i.tradingsymbol,
+            exchange: i.exchange,
+            name: i.name || '',
+            type: i.instrument_type || '',
+            expiry: i.expiry || '',
+            instrument_token: i.instrument_token
+        }));
 
     res.json({ status: 'success', count: results.length, data: results });
 }));
@@ -1611,4 +1743,48 @@ router.post('/ticker/reconnect', authMiddleware, asyncHandler(async (req, res) =
     res.json({ success: started, connected: kiteTicker.isConnected() });
 }));
 
+/**
+ * Unified watchlist for Socket.IO (same cache + build path as GET /market/watchlist).
+ * @param {number} userId
+ * @param {object} query - same query keys as HTTP route
+ * @returns {Promise<{ ok: boolean, data?: any[], kite_disconnected?: boolean, error?: string }>}
+ */
+async function fetchUnifiedWatchlistForSocket(userId, query = {}) {
+    try {
+        if (!kiteService.isAuthenticated()) {
+            return { ok: false, kite_disconnected: true, data: [], error: 'Kite not connected.' };
+        }
+
+        const configVer = global.WATCHLIST_CONFIG_VERSION || 0;
+        const cacheKey = `${query.nse || ''}_${query.nfoUnderlyings || ''}_${query.mcxOptSymbols || ''}_${query.nfoIndexOptRange || ''}_${WATCHLIST_CACHE_BUST}_v${configVer}`;
+
+        if (watchlistCache.data && watchlistCache.key === cacheKey) {
+            watchlistLastQuery = query;
+            watchlistLastUserId = userId;
+            startWatchlistAutoRefresh();
+            return { ok: true, data: watchlistCache.data };
+        }
+
+        const rows = await _buildWatchlistData(query, userId);
+        watchlistCache = { data: rows, time: Date.now(), key: cacheKey };
+        watchlistLastQuery = query;
+        watchlistLastUserId = userId;
+        startWatchlistAutoRefresh();
+        return { ok: true, data: rows };
+    } catch (err) {
+        console.error('fetchUnifiedWatchlistForSocket:', err.message);
+        if (err.message?.includes('403') || err.message?.includes('expired')) {
+            kiteService.clearSession();
+            try { if (userId) await kiteAuthService.disconnect(userId); } catch (_) { }
+            return { ok: false, kite_disconnected: true, data: [], error: 'Kite session expired. Please reconnect.' };
+        }
+        if (String(err.message || '').includes('Kite not connected')) {
+            return { ok: false, kite_disconnected: true, data: [], error: err.message };
+        }
+        return { ok: false, data: [], error: err.message };
+    }
+}
+
 module.exports = router;
+module.exports.fetchUnifiedWatchlistForSocket = fetchUnifiedWatchlistForSocket;
+module.exports.buildKiteDashboardPayload = buildKiteDashboardPayload;

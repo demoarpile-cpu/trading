@@ -8,8 +8,18 @@ const getBanks = async (req, res) => {
         console.log(`[getBanks] User ${userId} (${userRole}) requesting banks`);
 
         // Each user sees only their created banks
-        let query = 'SELECT * FROM bank_details WHERE created_by = ? OR created_by IS NULL ORDER BY id DESC';
+        let query = 'SELECT * FROM bank_details WHERE (created_by = ? OR created_by IS NULL) ORDER BY id DESC';
         let params = [userId];
+
+        // For TRADERS, also show banks created by their parent/admins
+        if (userRole === 'TRADER') {
+            query = `SELECT * FROM bank_details 
+                     WHERE created_by = ? 
+                     OR created_by IN (SELECT id FROM users WHERE role IN ('ADMIN', 'SUPERADMIN'))
+                     OR created_by IS NULL
+                     ORDER BY id DESC`;
+            params = [userId];
+        }
 
         // For SUPERADMIN/ADMIN, also include banks created by their children
         if (userRole === 'SUPERADMIN' || userRole === 'ADMIN') {

@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const { logAction } = require('./systemController');
 const { invalidateCache } = require('../utils/cacheManager');
+const MarginUtils = require('../utils/MarginUtils');
 
 const createFund = async (req, res) => {
     const { userId, amount, notes, mode } = req.body;
@@ -24,6 +25,28 @@ const createFund = async (req, res) => {
 
         const currentBalance = parseFloat(userRows[0].balance || 0);
         const amountNum = parseFloat(amount);
+        
+        if (type === 'WITHDRAW') {
+            const [trades] = await connection.execute('SELECT * FROM trades WHERE user_id = ? AND status = "OPEN"', [userId]);
+            const [settings] = await connection.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [userId]);
+            const clientConfig = settings.length > 0 ? JSON.parse(settings[0].config_json || '{}') : {};
+
+            const blockedMargin = MarginUtils.calculateTotalRequiredHoldingMargin(trades, clientConfig);
+            const withdrawable = currentBalance - blockedMargin;
+
+            if (amountNum > withdrawable) {
+                await connection.rollback();
+                return res.status(400).json({ 
+                    message: `Insufficient Withdrawable Balance. Client has open positions requiring holding margin.`,
+                    details: {
+                        ledgerBalance: currentBalance.toFixed(2),
+                        blockedMargin: blockedMargin.toFixed(2),
+                        withdrawable: withdrawable.toFixed(2)
+                    }
+                });
+            }
+        }
+
         const newBalance = type === 'DEPOSIT' ? currentBalance + amountNum : currentBalance - amountNum;
 
         // 2. Record in Ledger
@@ -175,6 +198,27 @@ const updateFund = async (req, res) => {
         const newEffect = newType === 'DEPOSIT' ? newAmount : -newAmount;
 
         const balanceChange = oldReverse + newEffect;
+
+        // 3.5 Check if updated withdrawal violates margin rules
+        if (newType === 'WITHDRAW') {
+            const [userRowsForCheck] = await connection.execute('SELECT balance FROM users WHERE id = ? FOR UPDATE', [old.user_id]);
+            const currentBalBeforeNewEffect = parseFloat(userRowsForCheck[0].balance || 0) + oldReverse;
+            
+            const [trades] = await connection.execute('SELECT * FROM trades WHERE user_id = ? AND status = "OPEN"', [old.user_id]);
+            const [settings] = await connection.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [old.user_id]);
+            const clientConfig = settings.length > 0 ? JSON.parse(settings[0].config_json || '{}') : {};
+
+            const blockedMargin = MarginUtils.calculateTotalRequiredHoldingMargin(trades, clientConfig);
+            const withdrawable = currentBalBeforeNewEffect - blockedMargin;
+
+            if (newAmount > withdrawable) {
+                await connection.rollback();
+                return res.status(400).json({ 
+                    message: `Cannot update withdrawal. Amount exceeds withdrawable balance based on open trades.`,
+                    details: { withdrawable: withdrawable.toFixed(2), blockedMargin: blockedMargin.toFixed(2) }
+                });
+            }
+        }
 
         // 4. Update user balance
         await connection.execute(

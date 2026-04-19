@@ -103,6 +103,9 @@ const runMigrations = async () => {
     // Add ban_all_segment_limit_order column
     await addColumn('client_settings', 'ban_all_segment_limit_order', 'TINYINT(1) DEFAULT 0');
 
+    // Add broker_id column
+    await addColumn('client_settings', 'broker_id', 'INT DEFAULT NULL');
+
     // ─── 4. BROKER SHARES ──────────────────────────────────────────────────────
 
     await db.execute(`
@@ -400,13 +403,15 @@ const runMigrations = async () => {
             speed      INT DEFAULT 10,
             is_active  TINYINT(1) DEFAULT 1,
             start_time DATETIME DEFAULT NULL,
-            end_time   DATETIME DEFAULT NULL
+            end_time   DATETIME DEFAULT NULL,
+            created_by INT DEFAULT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
     // Add start_time/end_time for tickers created before these columns existed
     await addColumn('tickers', 'start_time', 'DATETIME DEFAULT NULL AFTER is_active');
     await addColumn('tickers', 'end_time',   'DATETIME DEFAULT NULL AFTER start_time');
+    await addColumn('tickers', 'created_by', 'INT DEFAULT NULL');
 
     await db.execute(`
         CREATE TABLE IF NOT EXISTS banned_limit_orders (
@@ -444,9 +449,13 @@ const runMigrations = async () => {
             ifsc             VARCHAR(20) NOT NULL,
             branch           VARCHAR(100) NOT NULL,
             status           ENUM('Active','Inactive') DEFAULT 'Active',
+            created_by       INT DEFAULT NULL,
             created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+
+    // Add created_by if table existed before this column was added
+    await addColumn('bank_details', 'created_by', 'INT DEFAULT NULL');
 
     await db.execute(`
         CREATE TABLE IF NOT EXISTS support_tickets (
@@ -699,7 +708,7 @@ const runMigrations = async () => {
     // Trades table indexes
     await addIndex('trades', 'idx_trades_user_id', 'user_id');
     await addIndex('trades', 'idx_trades_status', 'status');
-    await addIndex('trades', 'idx_trades_created_at', 'created_at');
+    await addIndex('trades', 'idx_trades_entry_time', 'entry_time');
     await addIndex('trades', 'idx_trades_user_status', 'user_id, status');
     await addIndex('trades', 'idx_trades_symbol', 'symbol');
     await addIndex('trades', 'idx_trades_created_by', 'created_by');

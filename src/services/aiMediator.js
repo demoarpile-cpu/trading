@@ -3,9 +3,9 @@ const db = require('../config/db');
 
 let openai = null;
 if (process.env.OPENAI_API_KEY) {
-    openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 } else {
-    console.warn("⚠️  OPENAI_API_KEY missing in .env — Universal AI Mediator feature will be disabled.");
+  console.warn("⚠️  OPENAI_API_KEY missing in .env — Universal AI Mediator feature will be disabled.");
 }
 
 
@@ -279,7 +279,7 @@ EXAMPLES:
 
     try {
       if (!openai) {
-          throw new Error("OpenAI API key missing. AI features are disabled.");
+        throw new Error("OpenAI API key missing. AI features are disabled.");
       }
       response = await openai.chat.completions.create({
 

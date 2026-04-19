@@ -58,18 +58,19 @@ const getUsers = async (req, res) => {
             params.push(role);
         }
 
-        if (currentUserRole === 'BROKER') {
-            // If broker is viewing other BROKERS, show sub-brokers they created
-            if (role === 'BROKER') {
-                query += ' AND u.parent_id = ?';
-                params.push(currentUserId);
-            } else {
-                // For TRADER role, show both assigned clients AND created clients
-                query += ' AND (cs.broker_id = ? OR u.parent_id = ?)';
-                params.push(currentUserId, currentUserId);
-            }
+        if (currentUserRole === 'SUPERADMIN') {
+            // SUPERADMIN: See ALL users in the system
+            console.log(`[getUsers] SUPERADMIN ${currentUserId} viewing all ${role || 'users'}`);
+        } else if (currentUserRole === 'ADMIN') {
+            // ADMIN: See users they created OR users assigned to their brokers
+            query += ' AND (u.parent_id = ? OR u.id IN (SELECT user_id FROM client_settings WHERE broker_id IN (SELECT id FROM users WHERE parent_id = ?)))';
+            params.push(currentUserId, currentUserId);
+        } else if (currentUserRole === 'BROKER') {
+            // BROKER: See users where they are the parent OR assigned broker
+            query += ' AND (u.parent_id = ? OR cs.broker_id = ?)';
+            params.push(currentUserId, currentUserId);
         } else {
-            // SUPERADMIN, ADMIN: See only clients/brokers they created
+            // Default/Trader/Other: See only themselves or their direct creations
             query += ' AND u.parent_id = ?';
             params.push(currentUserId);
         }
@@ -151,6 +152,13 @@ const updateStatus = async (req, res) => {
         // Log the action
         await logAction(currentUserId, 'UPDATE_STATUS', 'users', `Updated status of user ID ${targetUserId} to ${status}`);
 
+        // Invalidate caches
+        try {
+            await invalidateCache(`users_${currentUserId}_all`);
+            await invalidateCache(`users_${currentUserId}_TRADER`);
+            await invalidateCache(`users_${currentUserId}_BROKER`);
+        } catch (e) {}
+
         res.json({ message: 'Status updated successfully' });
     } catch (err) {
 
@@ -216,6 +224,13 @@ const deleteUser = async (req, res) => {
         // Log the action
         await logAction(currentUserId, 'DELETE_USER', 'users', `Deleted user ID ${targetUserId}`);
 
+        // Invalidate caches
+        try {
+            await invalidateCache(`users_${currentUserId}_all`);
+            await invalidateCache(`users_${currentUserId}_TRADER`);
+            await invalidateCache(`users_${currentUserId}_BROKER`);
+        } catch (e) {}
+
         res.json({ message: 'User deleted successfully' });
     } catch (err) {
 
@@ -250,12 +265,20 @@ const updateUser = async (req, res) => {
         const summary = Object.keys(req.body).join(', ');
         await logAction(req.user.id, 'UPDATE_USER', 'users', `Updated user ID ${req.params.id}: modified ${summary}`);
 
-        // Clear cache for this user (Option A - immediate consistency)
+        // Invalidate ALL user list caches to ensure consistency across all admins/brokers
         try {
-            await invalidateCache(`users_${req.params.id}_all`);
-            await invalidateCache(`users_${req.params.id}_TRADER`);
-            await invalidateCache(`users_${req.params.id}_BROKER`);
-            console.log(`[Cache] Cleared user ${req.params.id} cache`);
+            await invalidateCache(`users_${req.user.id}_all`);
+            await invalidateCache(`users_${req.user.id}_TRADER`);
+            await invalidateCache(`users_${req.user.id}_BROKER`);
+            
+            // Also invalidate the parent's cache if different
+            if (parentId && parseInt(parentId) !== req.user.id) {
+                await invalidateCache(`users_${parentId}_all`);
+                await invalidateCache(`users_${parentId}_TRADER`);
+                await invalidateCache(`users_${parentId}_BROKER`);
+            }
+            
+            console.log(`[Cache] Cleared user list caches for updater ${req.user.id}`);
         } catch (e) {
             console.log(`[Cache] Clear failed but update succeeded`);
         }

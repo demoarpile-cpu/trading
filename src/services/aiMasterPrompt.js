@@ -347,70 +347,70 @@ INPUT: "GOLD buy trades open"
  * @returns {Promise<object>} Execution-ready JSON
  */
 const processMasterCommand = async (text, userContext = {}) => {
-    if (!text || !text.trim()) {
-        return {
-            success: false,
-            error: 'Command text is required',
-        };
-    }
+  if (!text || !text.trim()) {
+    return {
+      success: false,
+      error: 'Command text is required',
+    };
+  }
 
-    const hasValidKey =
-        process.env.OPENAI_API_KEY &&
-        process.env.OPENAI_API_KEY.length > 30 &&
-        !process.env.OPENAI_API_KEY.startsWith('sk-your') &&
-        !process.env.OPENAI_API_KEY.includes('placeholder');
+  const hasValidKey =
+    process.env.OPENAI_API_KEY &&
+    process.env.OPENAI_API_KEY.length > 30 &&
+    !process.env.OPENAI_API_KEY.startsWith('sk-your') &&
+    !process.env.OPENAI_API_KEY.includes('placeholder');
 
-    if (!hasValidKey) {
-        return {
-            success: false,
-            error: 'OpenAI API key not configured',
-        };
-    }
+  if (!hasValidKey) {
+    return {
+      success: false,
+      error: 'OpenAI API key not configured',
+    };
+  }
 
-    try {
-        // 1. Load schema for context
-        const schema = await getSchemaSummary();
+  try {
+    // 1. Load schema for context
+    const schema = await getSchemaSummary();
 
-        // 2. Build master prompt
-        const masterPrompt = buildMasterPrompt(schema);
+    // 2. Build master prompt
+    const masterPrompt = buildMasterPrompt(schema);
 
-        // 3. Call OpenAI
-        const OpenAI = require('openai');
-        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    // 3. Call OpenAI
+    const OpenAI = require('openai');
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-        const completion = await openai.chat.completions.create({
-            model: 'gpt-4o',  // Latest & most powerful model
-            messages: [
-                {
-                    role: 'system',
-                    content: masterPrompt,
-                },
-                {
-                    role: 'user',
-                    content: `User Role: ${userContext.role || 'ADMIN'}\nUser: ${userContext.full_name || 'Admin'}\n\nCommand: ${text}`,
-                },
-            ],
-            temperature: 0,
-            response_format: { type: 'json_object' },
-        });
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',  // Latest & most powerful model
+      messages: [
+        {
+          role: 'system',
+          content: masterPrompt,
+        },
+        {
+          role: 'user',
+          content: `User Role: ${userContext.role || 'ADMIN'}\nUser: ${userContext.full_name || 'Admin'}\n\nCommand: ${text}`,
+        },
+      ],
+      temperature: 0,
+      response_format: { type: 'json_object' },
+    });
 
-        const result = JSON.parse(completion.choices[0].message.content);
+    const result = JSON.parse(completion.choices[0].message.content);
 
-        console.log('[aiMasterPrompt] ✅ Processed:', JSON.stringify({
-            module: result.intent?.module,
-            operation: result.intent?.operation,
-            confidence: result.intent?.confidence,
-        }));
+    console.log('[aiMasterPrompt] ✅ Processed:', JSON.stringify({
+      module: result.intent?.module,
+      operation: result.intent?.operation,
+      confidence: result.intent?.confidence,
+    }));
 
-        return result;
+    return result;
 
-    } catch (err) {
-        console.error('[aiMasterPrompt] ❌ Error:', err.message);
-        return {
-            success: false,
-            error: err.message || 'Master command processing failed',
-        };
-    }
+  } catch (err) {
+    console.error('[aiMasterPrompt] ❌ Error:', err.message);
+    return {
+      success: false,
+      error: err.message || 'Master command processing failed',
+    };
+  }
 };
 
 module.exports = { processMasterCommand, buildMasterPrompt };
