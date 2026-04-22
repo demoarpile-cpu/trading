@@ -90,6 +90,7 @@ class SocketManager {
                         watchlist: Array.isArray(kiteResult.data) ? kiteResult.data : [],
                         crypto,
                         forex,
+                        binance_error: marketDataService.getBinanceError(),
                         dashboard,
                         excludedContracts: global.EXCLUDED_CONTRACTS || [],
                         error: kiteResult.error || null

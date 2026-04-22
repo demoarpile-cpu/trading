@@ -193,23 +193,52 @@ exports.saveContractSelection = async (req, res) => {
 
 exports.searchContracts = async (req, res) => {
     try {
-        if (!kiteService.isAuthenticated()) {
-            return res.status(403).json({
-                status: 'error',
-                message: 'Kite not connected.'
-            });
-        }
         const { q } = req.query;
-        const allContracts = await getAllContractsFromKite();
         const searchTerm = (q || '').toLowerCase();
-        const filtered = allContracts.filter(c =>
-            c.name.toLowerCase().includes(searchTerm) ||
-            c.symbol.toLowerCase().includes(searchTerm)
+
+        let kiteContracts = [];
+        // Only fetch Kite contracts if authenticated, otherwise return empty for Kite part
+        if (kiteService.isAuthenticated()) {
+            const allKite = await getAllContractsFromKite();
+            kiteContracts = allKite.filter(c =>
+                c.name.toLowerCase().includes(searchTerm) ||
+                c.symbol.toLowerCase().includes(searchTerm)
+            ).map(c => ({
+                ...c,
+                isSelected: !excludedContracts.includes(c.symbol)
+            }));
+        }
+
+        // --- Include Crypto & Forex from MarketDataService ---
+        const marketDataService = require('../services/MarketDataService');
+        const cryptoData = marketDataService.getCryptoPrices().filter(c =>
+            c.symbol.toLowerCase().includes(searchTerm) || (c.name || '').toLowerCase().includes(searchTerm)
         ).map(c => ({
-            ...c,
-            isSelected: !excludedContracts.includes(c.symbol)
+            symbol: c.symbol,
+            name: c.name,
+            segment: 'CRYPTO',
+            type: 'CRYPTO',
+            isSelected: true
         }));
-        res.json({ status: 'success', total: filtered.length, data: filtered });
+
+        const forexData = marketDataService.getForexPrices().filter(f =>
+            f.symbol.toLowerCase().includes(searchTerm) || (f.name || '').toLowerCase().includes(searchTerm)
+        ).map(f => ({
+            symbol: f.symbol,
+            name: f.name,
+            segment: 'FOREX',
+            type: 'FOREX',
+            isSelected: true
+        }));
+
+        const combined = [...kiteContracts, ...cryptoData, ...forexData];
+
+        res.json({
+            status: 'success',
+            total: combined.length,
+            data: combined,
+            kite_connected: kiteService.isAuthenticated()
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

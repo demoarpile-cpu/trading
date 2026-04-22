@@ -57,12 +57,12 @@ class MarketDataService extends EventEmitter {
         super();
         this.ticker = null;
         this.isConnecting = false;
-        
+
         // Unified State Management
         // Key format: "CRYPTO:BTC/USD", "FOREX:XAU/USD", "NSE:RELIANCE"
-        this.prices = {}; 
+        this.prices = {};
         this.dirtySymbols = new Set();
-        
+
         // Subscription Sets
         this.subscribedTokens = new Set();
         this.subscribedSymbols = new Set();
@@ -72,9 +72,10 @@ class MarketDataService extends EventEmitter {
         this.binanceWs = null;
         this.isBinanceActive = false;
         this.binanceReconnectAttempts = 0;
+        this.binanceError = null; // Track Binance specific errors
         this.binanceToFrontend = {};
         this.frontendToBinance = {};
-        
+
         // Forex Polling State
         this.forexInterval = null;
 
@@ -271,30 +272,37 @@ class MarketDataService extends EventEmitter {
 
     async _fetchInitialBinanceData() {
         try {
-            const symbols = CRYPTO_SYMBOLS_LIST.map(s => `"${this.frontendToBinance[s].toUpperCase()}"`).join(',');
-            const response = await axios.get(`${BINANCE_REST_BASE}/ticker/24hr?symbols=[${symbols}]`);
+            this.binanceError = null; // Reset
+            const bSymbols = CRYPTO_SYMBOLS_LIST.map(s => this.frontendToBinance[s].toUpperCase());
+            const symbolsParam = JSON.stringify(bSymbols);
+            const url = `${BINANCE_REST_BASE}/ticker/24hr?symbols=${encodeURIComponent(symbolsParam)}`;
 
-            response.data.forEach(item => {
-                const frontendSym = this.binanceToFrontend[item.symbol];
-                if (!frontendSym) return;
+            const response = await axios.get(url);
 
-                const symbolKey = `CRYPTO:${frontendSym}`;
-                const meta = SYMBOL_META[frontendSym] || { name: frontendSym, category: 'crypto' };
-                
-                this.prices[symbolKey] = {
-                    ...this.prices[symbolKey],
-                    symbol: symbolKey,
-                    name: meta.name,
-                    category: meta.category,
-                    type: 'CRYPTO',
-                    ltp: parseFloat(item.lastPrice),
-                    change: parseFloat(item.priceChange),
-                    chg_pct: item.priceChangePercent,
-                    direction: parseFloat(item.priceChange) >= 0 ? 'up' : 'down'
-                };
-                this.dirtySymbols.add(symbolKey);
-            });
+            if (response.data && Array.isArray(response.data)) {
+                response.data.forEach(item => {
+                    const frontendSym = this.binanceToFrontend[item.symbol];
+                    if (!frontendSym) return;
+
+                    const symbolKey = `CRYPTO:${frontendSym}`;
+                    const meta = SYMBOL_META[frontendSym] || { name: frontendSym, category: 'crypto' };
+
+                    this.prices[symbolKey] = {
+                        ...this.prices[symbolKey],
+                        symbol: symbolKey,
+                        name: meta.name,
+                        category: meta.category,
+                        type: 'CRYPTO',
+                        ltp: parseFloat(item.lastPrice),
+                        change: parseFloat(item.priceChange),
+                        chg_pct: item.priceChangePercent,
+                        direction: parseFloat(item.priceChange) >= 0 ? 'up' : 'down'
+                    };
+                    this.dirtySymbols.add(symbolKey);
+                });
+            }
         } catch (err) {
+            this.binanceError = `Binance Blocked: ${err.message}`;
             console.error('⚠️ Binance Snapshot Error:', err.message);
         }
     }
@@ -307,7 +315,7 @@ class MarketDataService extends EventEmitter {
         const url = `${BINANCE_WS_BASE}${streams}`;
 
         if (this.binanceWs) {
-            try { this.binanceWs.close(); } catch (e) {}
+            try { this.binanceWs.close(); } catch (e) { }
         }
 
         this.binanceWs = new WebSocket(url);
@@ -417,7 +425,7 @@ class MarketDataService extends EventEmitter {
 
                 const symbolKey = `FOREX:${sym}`;
                 const meta = SYMBOL_META[sym] || { name: sym, category: 'forex' };
-                
+
                 this.prices[symbolKey] = {
                     symbol: symbolKey,
                     name: meta.name,
@@ -458,6 +466,10 @@ class MarketDataService extends EventEmitter {
 
     getCryptoPrices() {
         return CRYPTO_SYMBOLS_LIST.map(sym => this.prices[`CRYPTO:${sym}`]).filter(Boolean);
+    }
+
+    getBinanceError() {
+        return this.binanceError;
     }
 
     getForexPrices() {
