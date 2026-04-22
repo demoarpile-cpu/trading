@@ -11,97 +11,103 @@ const { logAction } = require('../controllers/systemController');
 const startRolloverMarginJob = () => {
     cron.schedule('* * * * *', async () => {
         try {
-            // 1. Check if it's square-off time
-            const [ruleRows] = await db.execute('SELECT square_off_time, auto_square_off FROM expiry_rules WHERE id = 1');
-            const rule = ruleRows[0];
-            if (!rule || rule.auto_square_off !== 'Yes') return;
+            // 1. Fetch all expiry rules
+            const [rules] = await db.execute('SELECT * FROM expiry_rules');
+            if (!rules.length) return;
 
-            const [hh, mm] = (rule.square_off_time || '23:30').split(':');
             const now = new Date();
-            if (parseInt(hh) !== now.getHours() || parseInt(mm) !== now.getMinutes()) return;
+            const currentH = now.getHours();
+            const currentM = now.getMinutes();
 
-            console.log(`[RolloverCheck] Starting daily margin check at ${hh}:${mm}...`);
-
-            // 2. Fetch all OPEN trades (excluding pending orders)
-            const [trades] = await db.execute(`
+            // 2. Fetch all potentially relevant trades for the whole system once
+            const [allTrades] = await db.execute(`
                 SELECT t.id, t.user_id, t.symbol, t.qty, t.margin_used, t.market_type, t.type, t.entry_price,
                        u.balance,
                        cs.config_json
                 FROM trades t
                 JOIN users u ON t.user_id = u.id
                 JOIN client_settings cs ON t.user_id = cs.user_id
-                WHERE t.status = 'OPEN' AND t.is_pending = 0 AND t.market_type = 'MCX'
+                WHERE t.status = 'OPEN' AND t.is_pending = 0 AND t.market_type IN ('MCX', 'FOREX', 'CRYPTO', 'COMEX')
             `);
 
-            if (trades.length === 0) return;
+            if (allTrades.length === 0) return;
 
-            for (const trade of trades) {
-                try {
-                    const clientConfig = JSON.parse(trade.config_json || '{}');
-                    const brokerMargins = clientConfig.brokerMcxMargins || {};
-                    const baseScrip = getMcxBaseScrip(trade.symbol);
-                    
-                    // 3. Get Holding Margin Setting
-                    const holdingMarginKey = `${baseScrip} HOLDING`;
-                    const holdingMarginPerLot = parseFloat(brokerMargins[holdingMarginKey] || 0);
+            // Fetch all users once for hierarchy building
+            const [allUsers] = await db.execute('SELECT id, parent_id FROM users');
 
-                    // If no specific holding margin (>1), we treat it as no extra requirement
-                    if (holdingMarginPerLot <= 1) continue;
+            for (const rule of rules) {
+                if (rule.auto_square_off !== 'Yes') continue;
 
-                    const totalHoldingRequired = holdingMarginPerLot * trade.qty;
-                    const shortfall = totalHoldingRequired - parseFloat(trade.margin_used);
+                const [hh, mm] = (rule.square_off_time || '23:30').split(':');
+                if (parseInt(hh) !== currentH || parseInt(mm) !== currentM) continue;
 
-                    if (shortfall <= 0) {
-                        // Already covered or no change needed
-                        continue;
-                    }
+                console.log(`[RolloverCheck] Starting daily margin check for Admin #${rule.user_id} at ${hh}:${mm}...`);
 
-                    // 4. Validate Balance
-                    if (parseFloat(trade.balance) >= shortfall) {
-                        // Enough balance -> Deduct and Update Margin
-                        await db.execute(
-                            'UPDATE users SET balance = balance - ? WHERE id = ?',
-                            [shortfall, trade.user_id]
-                        );
-                        await db.execute(
-                            'UPDATE trades SET margin_used = ? WHERE id = ?',
-                            [totalHoldingRequired, trade.id]
-                        );
-                        console.log(`[RolloverCheck] ✅ Updated margin for trade #${trade.id} (User: ${trade.user_id}). Added: ${shortfall}, New Total: ${totalHoldingRequired}`);
-                        
-                        await logAction(0, 'ROLLOVER_MARGIN_UPDATE', 'trades', 
-                            `Increased margin for trade #${trade.id} from ${trade.margin_used} to ${totalHoldingRequired} (Shortfall ${shortfall} deducted)`);
-                    } else {
-                        // INSUFFICIENT BALANCE -> FORCE CLOSE (Square-off)
-                        console.log(`[RolloverCheck] ❌ Insufficient balance for trade #${trade.id} (User: ${trade.user_id}). Required: ${shortfall}, Available: ${trade.balance}. Force closing...`);
-                        
-                        // Get current market price
+                // Identify descendants of this admin
+                const descendantIdsSet = new Set();
+                const queue = [rule.user_id];
+                const processed = new Set();
+                while (queue.length > 0) {
+                    const pid = queue.shift();
+                    if (processed.has(pid)) continue;
+                    processed.add(pid);
+                    const children = allUsers.filter(u => u.parent_id === pid).map(u => u.id);
+                    for (const cid of children) descendantIdsSet.add(cid);
+                    queue.push(...children);
+                }
+
+                if (descendantIdsSet.size === 0) continue;
+
+                // Process trades belonging to these descendants
+                const relevantTrades = allTrades.filter(t => descendantIdsSet.has(t.user_id));
+                if (relevantTrades.length === 0) continue;
+
+                for (const trade of relevantTrades) {
+                    try {
+                        const clientConfig = JSON.parse(trade.config_json || '{}');
+                        let totalHoldingRequired = 0;
                         const currentPrice = mockEngine.getPrice(trade.symbol) || trade.entry_price;
-                        
-                        // Calculate PnL
-                        const pnl = trade.type === 'BUY'
-                            ? (currentPrice - trade.entry_price) * trade.qty
-                            : (trade.entry_price - currentPrice) * trade.qty;
 
-                        // Release margin + Add PnL
-                        const refundAmount = parseFloat(trade.margin_used) + pnl;
+                        if (trade.market_type === 'MCX') {
+                            const brokerMargins = clientConfig.brokerMcxMargins || {};
+                            const baseScrip = getMcxBaseScrip(trade.symbol);
+                            const holdingMarginKey = `${baseScrip} HOLDING`;
+                            const holdingMarginPerLot = parseFloat(brokerMargins[holdingMarginKey] || 0);
+                            
+                            if (holdingMarginPerLot <= 1) continue;
+                            totalHoldingRequired = holdingMarginPerLot * trade.qty;
+                        } else {
+                            let holdingExposure = 0;
+                            if (trade.market_type === 'FOREX') holdingExposure = parseFloat(clientConfig.forexConfig?.holdingMargin || 0);
+                            else if (trade.market_type === 'CRYPTO') holdingExposure = parseFloat(clientConfig.cryptoConfig?.holdingMargin || 0);
+                            else if (trade.market_type === 'COMEX') holdingExposure = parseFloat(clientConfig.comexConfig?.holdingMargin || 0);
 
-                        await db.execute(
-                            'UPDATE trades SET status = "CLOSED", exit_price = ?, exit_time = NOW(), pnl = ? WHERE id = ?',
-                            [currentPrice, pnl, trade.id]
-                        );
-                        await db.execute(
-                            'UPDATE users SET balance = balance + ? WHERE id = ?',
-                            [refundAmount, trade.user_id]
-                        );
+                            const turnover = currentPrice * trade.qty;
+                            if (holdingExposure > 1) totalHoldingRequired = turnover / holdingExposure;
+                            else totalHoldingRequired = turnover * 0.1;
+                        }
 
-                        console.log(`[RolloverCheck] 🛡️ Force closed trade #${trade.id} @ ${currentPrice}. Refunded: ${refundAmount.toFixed(2)} (Margin: ${trade.margin_used} + PnL: ${pnl.toFixed(2)})`);
-                        
-                        await logAction(0, 'FORCE_CLOSE_ROLLOVER', 'trades', 
-                            `Force closed trade #${trade.id} due to insufficient rollover margin. Required: ${totalHoldingRequired}, Balance: ${trade.balance}`);
+                        const shortfall = totalHoldingRequired - parseFloat(trade.margin_used);
+                        if (shortfall <= 0) continue;
+
+                        const userBalance = parseFloat(trade.balance);
+                        if (userBalance >= shortfall) {
+                            await db.execute('UPDATE users SET balance = balance - ? WHERE id = ?', [shortfall, trade.user_id]);
+                            await db.execute('UPDATE trades SET margin_used = ? WHERE id = ?', [totalHoldingRequired, trade.id]);
+                            console.log(`[RolloverCheck] Admin #${rule.user_id}: Updated margin for trade #${trade.id}. New Total: ${totalHoldingRequired.toFixed(2)}`);
+                        } else {
+                            console.log(`[RolloverCheck] Admin #${rule.user_id}: Insufficient balance for trade #${trade.id}. Force closing...`);
+                            const pnl = trade.type === 'BUY'
+                                ? (currentPrice - trade.entry_price) * trade.qty
+                                : (trade.entry_price - currentPrice) * trade.qty;
+
+                            const refundAmount = parseFloat(trade.margin_used) + pnl;
+                            await db.execute('UPDATE trades SET status = "CLOSED", exit_price = ?, exit_time = NOW(), pnl = ? WHERE id = ?', [currentPrice, pnl, trade.id]);
+                            await db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', [refundAmount, trade.user_id]);
+                        }
+                    } catch (err) {
+                        console.error(`[RolloverCheck] Error processing trade #${trade.id}:`, err.message);
                     }
-                } catch (err) {
-                    console.error(`[RolloverCheck] Error processing trade #${trade.id}:`, err.message);
                 }
             }
         } catch (err) {
@@ -109,7 +115,7 @@ const startRolloverMarginJob = () => {
         }
     });
 
-    console.log('[RolloverCheck] Daily margin rollover job started');
+    console.log('[RolloverCheck] Per-admin daily margin rollover job started');
 };
 
 module.exports = { startRolloverMarginJob };

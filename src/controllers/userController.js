@@ -59,8 +59,10 @@ const getUsers = async (req, res) => {
         }
 
         if (currentUserRole === 'SUPERADMIN') {
-            // SUPERADMIN: See ALL users in the system
-            console.log(`[getUsers] SUPERADMIN ${currentUserId} viewing all ${role || 'users'}`);
+            // SUPERADMIN: See only users they directly created
+            console.log(`[getUsers] SUPERADMIN ${currentUserId} viewing their own direct users`);
+            query += ' AND u.parent_id = ?';
+            params.push(currentUserId);
         } else if (currentUserRole === 'ADMIN') {
             // ADMIN: See users they created OR users assigned to their brokers
             query += ' AND (u.parent_id = ? OR u.id IN (SELECT user_id FROM client_settings WHERE broker_id IN (SELECT id FROM users WHERE parent_id = ?)))';

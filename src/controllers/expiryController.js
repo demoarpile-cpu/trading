@@ -1,9 +1,19 @@
 const db = require('../config/db');
 
 const getExpiryRules = async (req, res) => {
+    const userId = req.user.id;
     try {
-        const [rows] = await db.execute('SELECT * FROM expiry_rules WHERE id = 1');
-        if (!rows.length) return res.json({});
+        const [rows] = await db.execute('SELECT * FROM expiry_rules WHERE user_id = ?', [userId]);
+        if (!rows.length) {
+            // Return defaults if no settings found for this user
+            return res.json({
+                autoSquareOff: 'No',
+                expirySquareOffTime: '11:30',
+                allowExpiringScrip: 'No',
+                daysBeforeExpiry: '0',
+                mcxOptionsAwayPoints: {}
+            });
+        }
         const row = rows[0];
         res.json({
             autoSquareOff: row.auto_square_off,
@@ -20,16 +30,21 @@ const getExpiryRules = async (req, res) => {
 
 const updateExpiryRules = async (req, res) => {
     const { autoSquareOff, expirySquareOffTime, allowExpiringScrip, daysBeforeExpiry, mcxOptionsAwayPoints } = req.body;
+    const userId = req.user.id;
+
     try {
+        console.log(`[ExpiryController] Updating rules for user ${userId}:`, { autoSquareOff, expirySquareOffTime });
         await db.execute(
-            `UPDATE expiry_rules SET
-                auto_square_off      = ?,
-                square_off_time      = ?,
-                allow_expiring_scrip = ?,
-                days_before_expiry   = ?,
-                away_points          = ?
-             WHERE id = 1`,
+            `INSERT INTO expiry_rules (user_id, auto_square_off, square_off_time, allow_expiring_scrip, days_before_expiry, away_points)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                auto_square_off      = VALUES(auto_square_off),
+                square_off_time      = VALUES(square_off_time),
+                allow_expiring_scrip = VALUES(allow_expiring_scrip),
+                days_before_expiry   = VALUES(days_before_expiry),
+                away_points          = VALUES(away_points)`,
             [
+                userId,
                 autoSquareOff || 'No',
                 expirySquareOffTime || '11:30',
                 allowExpiringScrip || 'No',

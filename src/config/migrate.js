@@ -426,19 +426,31 @@ const runMigrations = async () => {
     await db.execute(`
         CREATE TABLE IF NOT EXISTS expiry_rules (
             id                    INT AUTO_INCREMENT PRIMARY KEY,
+            user_id               INT DEFAULT NULL,
             auto_square_off       ENUM('Yes','No') DEFAULT 'No',
             square_off_time       VARCHAR(10) DEFAULT '11:30',
             allow_expiring_scrip  ENUM('Yes','No') DEFAULT 'No',
             days_before_expiry    INT DEFAULT 0,
             away_points           JSON DEFAULT NULL,
-            updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_user_expiry (user_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
-    await db.execute(`
-        INSERT IGNORE INTO expiry_rules (id, auto_square_off, square_off_time, allow_expiring_scrip, days_before_expiry)
-        VALUES (1, 'No', '11:30', 'No', 0)
-    `);
+    // Ensure user_id column exists for existing tables
+    await addColumn('expiry_rules', 'user_id', 'INT DEFAULT NULL AFTER id');
+    
+    // Add unique constraint if not already there
+    try { await db.execute('ALTER TABLE expiry_rules ADD UNIQUE KEY uq_user_expiry (user_id)'); } catch(_) {}
+
+    // Seed initial rule for the first SUPERADMIN found
+    const [[sa]] = await db.execute("SELECT id FROM users WHERE role = 'SUPERADMIN' LIMIT 1");
+    if (sa) {
+        await db.execute(`
+            INSERT IGNORE INTO expiry_rules (user_id, auto_square_off, square_off_time, allow_expiring_scrip, days_before_expiry)
+            VALUES (?, 'No', '11:30', 'No', 0)
+        `, [sa.id]);
+    }
 
     await db.execute(`
         CREATE TABLE IF NOT EXISTS bank_details (
@@ -581,6 +593,17 @@ const runMigrations = async () => {
             KEY user_id (user_id),
             KEY admin_id (admin_id),
             KEY status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    // Permanent Banned Scrips (Affects all order types)
+    await db.execute(`
+        CREATE TABLE IF NOT EXISTS banned_scrips (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            symbol      VARCHAR(100) NOT NULL UNIQUE,
+            created_by  INT NOT NULL,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            KEY symbol_idx (symbol)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 

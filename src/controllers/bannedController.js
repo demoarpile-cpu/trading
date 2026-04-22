@@ -86,9 +86,62 @@ const deleteMultipleBannedOrders = async (req, res) => {
     }
 };
 
+const getBannedScrips = async (req, res) => {
+    try {
+        const [rows] = await db.execute('SELECT symbol FROM banned_scrips');
+        res.json(rows.map(r => r.symbol));
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+const toggleBannedScrip = async (req, res) => {
+    const { symbol, action } = req.body; // action: 'ban' or 'unban'
+    if (!symbol) return res.status(400).json({ message: 'Symbol is required' });
+
+    try {
+        if (action === 'ban') {
+            await db.execute('INSERT IGNORE INTO banned_scrips (symbol, created_by) VALUES (?, ?)', [symbol, req.user.id]);
+            res.json({ message: `${symbol} banned successfully` });
+        } else {
+            await db.execute('DELETE FROM banned_scrips WHERE symbol = ?', [symbol]);
+            res.json({ message: `${symbol} unbanned successfully` });
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+const bulkToggleBannedScrips = async (req, res) => {
+    const { symbols, action } = req.body;
+    if (!Array.isArray(symbols) || symbols.length === 0) {
+        return res.status(400).json({ message: 'Symbols array is required' });
+    }
+
+    try {
+        if (action === 'ban') {
+            for (const sym of symbols) {
+                await db.execute('INSERT IGNORE INTO banned_scrips (symbol, created_by) VALUES (?, ?)', [sym, req.user.id]);
+            }
+        } else {
+            const placeholders = symbols.map(() => '?').join(',');
+            await db.execute(`DELETE FROM banned_scrips WHERE symbol IN (${placeholders})`, symbols);
+        }
+        res.json({ message: `Bulk ${action} successful` });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
 module.exports = {
     getBannedOrders,
     createBannedOrder,
     deleteBannedOrder,
-    deleteMultipleBannedOrders
+    deleteMultipleBannedOrders,
+    getBannedScrips,
+    toggleBannedScrip,
+    bulkToggleBannedScrips
 };

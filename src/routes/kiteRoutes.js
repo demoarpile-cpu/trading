@@ -50,13 +50,27 @@ let indexedInstruments = {
     MCX: { FUT: [], OPT: [] }
 };
 
+let fetchingPromise = null;
+
 async function getInstrumentsFromCache() {
     const now = Date.now();
+    
+    // 1. If we have a valid cache, return it
     if (instrumentsCache && (now - instrumentsCacheTime) < CACHE_TTL) {
         return instrumentsCache;
     }
-    console.log('⚡ Fetching and INDEXING ALL instruments from Kite API...');
-    const instruments = await kiteService.getInstruments();
+
+    // 2. If already fetching/indexing, wait for that promise
+    if (fetchingPromise) {
+        return fetchingPromise;
+    }
+
+    // 3. Start a new fetch/index process and cache the promise
+    fetchingPromise = (async () => {
+        try {
+            console.log('⚡ Fetching and INDEXING ALL instruments from Kite API...');
+            const instruments = await kiteService.getInstruments();
+
 
     // 1. Rebuild basic mapping
     const newMap = new Map();
@@ -84,13 +98,22 @@ async function getInstrumentsFromCache() {
         }
     });
 
-    symbolTokenMap = newMap;
-    indexedInstruments = newIndex;
-    instrumentsCache = instruments;
-    instrumentsCacheTime = now;
+            symbolTokenMap = newMap;
+            indexedInstruments = newIndex;
+            instrumentsCache = instruments;
+            instrumentsCacheTime = now;
 
-    console.log(`✅ Indexed ${instruments.length} instruments`);
-    return instruments;
+            console.log(`✅ Indexed ${instruments.length} instruments`);
+            return instruments;
+        } catch (err) {
+            console.error('❌ Failed to fetch/index instruments:', err.message);
+            throw err;
+        } finally {
+            fetchingPromise = null;
+        }
+    })();
+
+    return fetchingPromise;
 }
 
 function getTokenSync(symbol) {

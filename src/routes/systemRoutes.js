@@ -2,14 +2,18 @@ const express = require('express');
 const router = express.Router();
 const { getActionLedger, globalBatchUpdate, getSegmentValues, resetSegmentValues } = require('../controllers/systemController');
 const { getAllScrips, updateScrip, getTickers, createTicker, updateTicker, deleteTicker } = require('../controllers/scripController');
-const { getBannedOrders, createBannedOrder, deleteBannedOrder, deleteMultipleBannedOrders } = require('../controllers/bannedController');
+const { getBannedOrders, createBannedOrder, deleteBannedOrder, deleteMultipleBannedOrders, getBannedScrips, toggleBannedScrip, bulkToggleBannedScrips } = require('../controllers/bannedController');
 const { getExpiryRules, updateExpiryRules } = require('../controllers/expiryController');
 const { authMiddleware, roleMiddleware } = require('../middleware/auth');
 
-router.get('/audit-log',       authMiddleware, roleMiddleware(['SUPERADMIN','ADMIN']), getActionLedger);
-router.post('/global-update',  authMiddleware, roleMiddleware(['SUPERADMIN']), globalBatchUpdate);
-router.get('/segment-values',  authMiddleware, roleMiddleware(['SUPERADMIN','ADMIN']), getSegmentValues);
-router.post('/reset-segment',  authMiddleware, roleMiddleware(['SUPERADMIN']), resetSegmentValues);
+router.get('/ping', (req, res) => {
+    res.json({ status: 'ok', timestamp: Date.now(), platform: 'Railway / Node.js' });
+});
+
+router.get('/audit-log', authMiddleware, roleMiddleware(['SUPERADMIN', 'ADMIN']), getActionLedger);
+router.post('/global-update', authMiddleware, roleMiddleware(['SUPERADMIN']), globalBatchUpdate);
+router.get('/segment-values', authMiddleware, roleMiddleware(['SUPERADMIN', 'ADMIN']), getSegmentValues);
+router.post('/reset-segment', authMiddleware, roleMiddleware(['SUPERADMIN']), resetSegmentValues);
 
 // Scrip & Ticker Management
 router.get('/scrips', authMiddleware, getAllScrips);
@@ -28,5 +32,10 @@ router.get('/banned-orders', authMiddleware, getBannedOrders);
 router.post('/banned-orders', authMiddleware, roleMiddleware(['SUPERADMIN', 'ADMIN']), createBannedOrder);
 router.delete('/banned-orders/:id', authMiddleware, roleMiddleware(['SUPERADMIN', 'ADMIN']), deleteBannedOrder);
 router.post('/banned-orders/delete-multiple', authMiddleware, roleMiddleware(['SUPERADMIN', 'ADMIN']), deleteMultipleBannedOrders);
+
+// Permanent Banned Scrips
+router.get('/banned-scrips', authMiddleware, getBannedScrips);
+router.post('/banned-scrips/toggle', authMiddleware, roleMiddleware(['SUPERADMIN', 'ADMIN']), toggleBannedScrip);
+router.post('/banned-scrips/bulk-toggle', authMiddleware, roleMiddleware(['SUPERADMIN', 'ADMIN']), bulkToggleBannedScrips);
 
 module.exports = router;

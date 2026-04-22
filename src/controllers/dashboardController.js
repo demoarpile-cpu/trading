@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const marketDataService = require('../services/MarketDataService');
+const { getMcxBaseScrip } = require('../utils/symbolHelper');
 
 /**
  * Live Market Prices (Snapshot)
@@ -23,8 +24,6 @@ const getClientLiveM2M = async (req, res) => {
         const { id: userId, role } = req.user;
 
         // 1. Fetch all relevant trades (Non-Deleted)
-        // If SUPERADMIN, get all. If ADMIN/BROKER, get their tree or created_by.
-        // For now, mirroring existing logic but expanding for Superadmin.
         let tradeQuery = `
             SELECT t.*, u.username, u.full_name, u.role as user_role
             FROM trades t
@@ -45,39 +44,65 @@ const getClientLiveM2M = async (req, res) => {
 
         const [trades] = await db.execute(tradeQuery, tradeParams);
 
-        // 2. Fetch all users involved if needed (already joined in trades)
-        
-        // 3. Initialize Stats Containers
-        const segments = ['mcx', 'nse', 'options', 'comex', 'forex', 'crypto'];
-        const stats = {
-            buyTurnover: {},
-            sellTurnover: {},
-            totalTurnover: {},
-            activeUsers: {},
-            profitLoss: {},
-            brokerage: {},
-            activeBuy: { mcx: 0, nse: 0, nse_spot: 0, options: 0, comex: 0 },
-            activeSell: { mcx: 0, nse: 0, nse_spot: 0, options: 0, comex: 0 }
-        };
-
-        segments.forEach(s => {
-            stats.buyTurnover[s] = 0;
-            stats.sellTurnover[s] = 0;
-            stats.totalTurnover[s] = 0;
-            stats.activeUsers[s] = new Set();
-            stats.profitLoss[s] = 0;
-            stats.brokerage[s] = 0;
+        // 2. Fetch Multipliers (Lot Sizes) from scrip_data
+        const [lotRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
+        const lotMap = {};
+        lotRows.forEach(r => {
+            lotMap[r.symbol.toUpperCase()] = parseFloat(r.lot_size || 1);
         });
 
-        const clientMap = {}; // userId -> { username, activePL, activeTrades, margin }
+        const getMultiplier = (symbol) => {
+            const sym = symbol.toUpperCase();
+            if (lotMap[sym]) return lotMap[sym];
+            const base = getMcxBaseScrip(symbol);
+            if (base && lotMap[base.toUpperCase()]) return lotMap[base.toUpperCase()];
+            const parts = sym.split(':');
+            const pureSym = parts[parts.length - 1];
+            if (lotMap[pureSym]) return lotMap[pureSym];
+            return 1;
+        };
 
-        // 4. Process Trades
+        // 3. Map for MarketDataService prefixes
+        const PREFIX_MAP = {
+            'EQUITY': 'NSE',
+            'NFO': 'NFO',
+            'MCX': 'MCX',
+            'OPTIONS': 'NFO',
+            'CRYPTO': 'CRYPTO',
+            'FOREX': 'FOREX',
+            'COMEX': 'COMEX'
+        };
+
+        const finalizedStats = {
+            buyTurnover: { mcx: '0.00', nse: '0.00', options: '0.00', comex: '0.00', forex: '0.00', crypto: '0.00' },
+            sellTurnover: { mcx: '0.00', nse: '0.00', options: '0.00', comex: '0.00', forex: '0.00', crypto: '0.00' },
+            totalTurnover: { mcx: '0.00', nse: '0.00', options: '0.00', comex: '0.00', forex: '0.00', crypto: '0.00' },
+            profitLoss: { mcx: '0.00', nse: '0.00', options: '0.00', comex: '0.00', forex: '0.00', crypto: '0.00' },
+            activeUsers: { mcx: 0, nse: 0, options: 0, comex: 0, forex: 0, crypto: 0 },
+            brokerage: { mcx: '0.00', nse: '0.00', options: '0.00', comex: '0.00', forex: '0.00', crypto: '0.00' },
+            activeBuy: { mcx: 0, nse: 0, options: 0, comex: 0, forex: 0, crypto: 0 },
+            activeSell: { mcx: 0, nse: 0, options: 0, comex: 0, forex: 0, crypto: 0 }
+        };
+
+        const stats = {
+            buyTurnover: {}, sellTurnover: {}, totalTurnover: {}, activeUsers: {}, profitLoss: {}, brokerage: {},
+            activeBuy: { mcx: 0, nse: 0, options: 0, comex: 0, forex: 0, crypto: 0 },
+            activeSell: { mcx: 0, nse: 0, options: 0, comex: 0, forex: 0, crypto: 0 }
+        };
+
+        const segments = ['mcx', 'nse', 'options', 'comex', 'forex', 'crypto'];
+        segments.forEach(s => {
+            stats.buyTurnover[s] = 0; stats.sellTurnover[s] = 0; stats.totalTurnover[s] = 0;
+            stats.activeUsers[s] = new Set(); stats.profitLoss[s] = 0; stats.brokerage[s] = 0;
+        });
+
+        const clientMap = {};
+
         trades.forEach(trade => {
-            const mType = (trade.market_type || 'MCX').toLowerCase();
-            let segment = mType === 'equity' ? 'nse' : mType;
+            const mType = (trade.market_type || 'MCX').toUpperCase();
+            let segment = mType === 'EQUITY' ? 'nse' : mType.toLowerCase();
             
-            // Distinguish NFO Futures vs Options
-            if (mType === 'nfo') {
+            if (mType === 'NFO' || mType === 'OPTIONS') {
                 const sym = trade.symbol.toUpperCase();
                 if (sym.endsWith('CE') || sym.endsWith('PE') || /\d{5,}/.test(sym)) {
                     segment = 'options';
@@ -89,52 +114,40 @@ const getClientLiveM2M = async (req, res) => {
             const isBuy = trade.type === 'BUY';
             const qty = Math.abs(trade.qty);
             const entryPrice = parseFloat(trade.entry_price || 0);
-            const tradeValue = entryPrice * qty;
+            const lotSize = getMultiplier(trade.symbol);
+            const tradeValue = entryPrice * qty * lotSize;
 
-            // Turnover (Total value of entries)
-            if (isBuy) {
-                stats.buyTurnover[segment] = (stats.buyTurnover[segment] || 0) + tradeValue;
-            } else {
-                stats.sellTurnover[segment] = (stats.sellTurnover[segment] || 0) + tradeValue;
-            }
-            stats.totalTurnover[segment] = (stats.totalTurnover[segment] || 0) + tradeValue;
+            if (isBuy) stats.buyTurnover[segment] += tradeValue;
+            else stats.sellTurnover[segment] += tradeValue;
+            stats.totalTurnover[segment] += tradeValue;
 
-            // Brokerage
-            stats.brokerage[segment] = (stats.brokerage[segment] || 0) + parseFloat(trade.brokerage || 0);
+            stats.brokerage[segment] += parseFloat(trade.brokerage || 0);
 
-            // Profit / Loss (Realized)
             if (trade.status === 'CLOSED') {
-                stats.profitLoss[segment] = (stats.profitLoss[segment] || 0) + parseFloat(trade.pnl || 0);
+                stats.profitLoss[segment] += parseFloat(trade.pnl || 0);
             }
 
-            // Active Data (OPEN trades)
             if (trade.status === 'OPEN') {
                 stats.activeUsers[segment].add(trade.user_id);
-                
-                // Active Buy/Sell counts
-                if (isBuy) stats.activeBuy[segment] = (stats.activeBuy[segment] || 0) + 1;
-                else stats.activeSell[segment] = (stats.activeSell[segment] || 0) + 1;
+                if (isBuy) stats.activeBuy[segment] += 1;
+                else stats.activeSell[segment] += 1;
 
-                // Calculate Unrealized P/L
-                const marketTypeUpper = (trade.market_type || 'MCX').toUpperCase();
-                const priceKey = `${marketTypeUpper}:${trade.symbol}`;
+                const prefix = PREFIX_MAP[mType] || mType;
+                let priceKey = trade.symbol.includes(':') ? trade.symbol : `${prefix}:${trade.symbol}`;
+
                 const liveData = marketDataService.getPrice(priceKey);
-                const currentPrice = liveData ? liveData.ltp : entryPrice;
+                const currentPrice = (liveData && liveData.ltp) ? liveData.ltp : entryPrice;
                 
-                const unrealizedPnl = isBuy 
-                    ? (currentPrice - entryPrice) * qty 
-                    : (entryPrice - currentPrice) * qty;
+                const unrealizedPnl = (isBuy 
+                    ? (currentPrice - entryPrice) 
+                    : (entryPrice - currentPrice)) * qty * lotSize;
 
-                stats.profitLoss[segment] = (stats.profitLoss[segment] || 0) + unrealizedPnl;
+                stats.profitLoss[segment] += unrealizedPnl;
 
-                // Client-wise aggregation
                 if (!clientMap[trade.user_id]) {
                     clientMap[trade.user_id] = {
-                        id: trade.user_id,
-                        username: trade.username,
-                        activePL: 0,
-                        activeTrades: 0,
-                        margin: 0
+                        id: trade.user_id, username: trade.username,
+                        activePL: 0, activeTrades: 0, margin: 0
                     };
                 }
                 clientMap[trade.user_id].activePL += unrealizedPnl;
@@ -147,37 +160,23 @@ const getClientLiveM2M = async (req, res) => {
         const formatValue = (val) => `${(val / 100000).toFixed(2)} Lakhs`;
         const formatValOnly = (val) => val.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-        const finalizedStats = {
-            buyTurnover: {},
-            sellTurnover: {},
-            totalTurnover: {},
-            activeUsers: {},
-            profitLoss: {},
-            brokerage: {},
-            activeBuy: stats.activeBuy,
-            activeSell: stats.activeSell
-        };
-
         segments.forEach(s => {
             finalizedStats.buyTurnover[s] = formatValue(stats.buyTurnover[s]);
             finalizedStats.sellTurnover[s] = formatValue(stats.sellTurnover[s]);
             finalizedStats.totalTurnover[s] = formatValue(stats.totalTurnover[s]);
-            finalizedStats.activeUsers[s] = stats.activeUsers[s].size.toString();
             finalizedStats.profitLoss[s] = formatValOnly(stats.profitLoss[s]);
             finalizedStats.brokerage[s] = formatValOnly(stats.brokerage[s]);
+            finalizedStats.activeUsers[s] = stats.activeUsers[s].size.toString();
+            finalizedStats.activeBuy[s] = stats.activeBuy[s].toString();
+            finalizedStats.activeSell[s] = stats.activeSell[s].toString();
         });
 
-        // Specific fix for "NSE Future" vs "NSE Futures" labels in frontend
-        finalizedStats.buyTurnover.nse = finalizedStats.buyTurnover.nse; 
-        
-        const clients = Object.values(clientMap).map(c => ({
-            ...c,
-            activePL: c.activePL.toFixed(2),
-            margin: c.margin.toFixed(2)
-        }));
-
         res.json({
-            clients,
+            clients: Object.values(clientMap).map(c => ({
+                ...c,
+                activePL: c.activePL.toFixed(2),
+                margin: c.margin.toFixed(2)
+            })),
             stats: finalizedStats
         });
 

@@ -115,11 +115,11 @@ const placeOrder = async (req, res) => {
         let marketType = 'MCX';
         if (MCX_SYMBOLS.some(s => sym.includes(s))) {
             marketType = 'MCX';
-        } else if (sym.includes('/') || ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD'].some(f => sym.includes(f))) {
-            marketType = 'FOREX';
-        } else if (['BTC', 'ETH', 'SOL', 'USDT'].some(c => sym.includes(c))) {
+        } else if (sym.startsWith('CRYPTO') || ['BTC', 'ETH', 'SOL', 'USDT'].some(c => sym.includes(c))) {
             marketType = 'CRYPTO';
-        } else if (['GC', 'SI', 'HG', 'CL'].some(c => sym.startsWith(c))) {
+        } else if (sym.startsWith('FOREX') || sym.includes('/') || ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD'].some(f => sym.includes(f))) {
+            marketType = 'FOREX';
+        } else if (sym.startsWith('COMEX') || ['GC', 'SI', 'HG', 'CL'].some(c => sym.startsWith(c))) {
             marketType = 'COMEX';
         } else {
             marketType = 'EQUITY';
@@ -140,6 +140,7 @@ const placeOrder = async (req, res) => {
         const qtyNum = parseInt(qty, 10);
         const currentPrice = mockEngine.getPrice(symbol);
         const executionPrice = price ? parseFloat(price) : (order_type === 'MARKET' ? currentPrice : 0);
+        let marginRequired = 0;
 
         // Validate parsed values
         if (isNaN(executionPrice) || executionPrice <= 0) {
@@ -189,6 +190,14 @@ const placeOrder = async (req, res) => {
             });
         }
         console.log('[placeOrder] ✅ Segment enabled check passed for:', marketType);
+
+        // ─── PERMANENT SCRIP BAN CHECK ──────────────────────────────────────────
+        const [scripBan] = await db.execute('SELECT id FROM banned_scrips WHERE symbol = ?', [symbol]);
+        if (scripBan.length > 0) {
+            return res.status(400).json({ 
+                message: `Trading in ${symbol} is prohibited. Scrip is currently banned.` 
+            });
+        }
 
         // 5. Banned Limit Order Check (TIER 2 - Enhanced with EQUITY/OPTIONS/International)
         console.log('[placeOrder] DEBUG - order_type:', order_type, 'marketType:', marketType, 'banMcxLimitOrder:', clientConfig.banMcxLimitOrder);
@@ -524,6 +533,45 @@ const placeOrder = async (req, res) => {
             console.log(`[placeOrder] ✅ EQUITY Exposure: Turnover=${turnover}, Exposure=${exposureValue}, MarginRequired=${marginRequired.toFixed(2)}`);
         }
 
+        // ─── CRYPTO Intraday Exposure ──────────────────────────────────────
+        if (marketType === 'CRYPTO' && clientConfig.cryptoTrading) {
+            const cryptoConfig = clientConfig.cryptoConfig || {};
+            const exposureValue = parseInt(cryptoConfig.intradayMargin || 0);
+            const turnover = executionPrice * qtyNum;
+            if (exposureValue > 1) {
+                marginRequired = turnover / exposureValue;
+            } else {
+                marginRequired = turnover * 0.1; // 10% default if not configured
+            }
+            console.log(`[placeOrder] ✅ CRYPTO Exposure: Turnover=${turnover}, Exposure=${exposureValue}, MarginRequired=${marginRequired.toFixed(2)}`);
+        }
+
+        // ─── FOREX Intraday Exposure ──────────────────────────────────────
+        if (marketType === 'FOREX' && clientConfig.forexTrading) {
+            const forexConfig = clientConfig.forexConfig || {};
+            const exposureValue = parseInt(forexConfig.intradayMargin || 0);
+            const turnover = executionPrice * qtyNum;
+            if (exposureValue > 1) {
+                marginRequired = turnover / exposureValue;
+            } else {
+                marginRequired = turnover * 0.1;
+            }
+            console.log(`[placeOrder] ✅ FOREX Exposure: Turnover=${turnover}, Exposure=${exposureValue}, MarginRequired=${marginRequired.toFixed(2)}`);
+        }
+
+        // ─── COMEX Intraday Exposure ──────────────────────────────────────
+        if (marketType === 'COMEX' && clientConfig.comexTrading) {
+            const comexConfig = clientConfig.comexConfig || {};
+            const exposureValue = parseInt(comexConfig.intradayMargin || 0);
+            const turnover = executionPrice * qtyNum;
+            if (exposureValue > 1) {
+                marginRequired = turnover / exposureValue;
+            } else {
+                marginRequired = turnover * 0.1;
+            }
+            console.log(`[placeOrder] ✅ COMEX Exposure: Turnover=${turnover}, Exposure=${exposureValue}, MarginRequired=${marginRequired.toFixed(2)}`);
+        }
+
         // Fallback if no exposure calculated
         if (marginRequired <= 0) {
             marginRequired = (executionPrice * qtyNum) * 0.1; // 10% default
@@ -787,6 +835,21 @@ const placeOrder = async (req, res) => {
                 });
             }
 
+            // Check max per script
+            const forexMaxLotScrip = parseInt(forexConfig.maxLotScrip || 0);
+            if (forexMaxLotScrip > 0) {
+                const [openForexForSymbol] = await db.execute(
+                    'SELECT COALESCE(SUM(qty), 0) as total_qty FROM trades WHERE user_id = ? AND status = "OPEN" AND symbol = ? AND market_type = "FOREX"',
+                    [targetUserId, symbol]
+                );
+                const currentForexQty = parseInt(openForexForSymbol[0]?.total_qty || 0);
+                if (currentForexQty + qtyNum > forexMaxLotScrip) {
+                    return res.status(400).json({
+                        message: `Max lot size for ${symbol} (FOREX) is ${forexMaxLotScrip}`
+                    });
+                }
+            }
+
             // Check max position size
             const forexMaxSizeAll = parseInt(forexConfig.maxSizeAll || 0);
             if (forexMaxSizeAll > 0) {
@@ -813,6 +876,21 @@ const placeOrder = async (req, res) => {
                 return res.status(400).json({
                     message: `CRYPTO lot size must be between ${minLot} and ${maxLot}. You entered ${qtyNum}`
                 });
+            }
+
+            // Check max per script
+            const cryptoMaxLotScrip = parseInt(cryptoConfig.maxLotScrip || 0);
+            if (cryptoMaxLotScrip > 0) {
+                const [openCryptoForSymbol] = await db.execute(
+                    'SELECT COALESCE(SUM(qty), 0) as total_qty FROM trades WHERE user_id = ? AND status = "OPEN" AND symbol = ? AND market_type = "CRYPTO"',
+                    [targetUserId, symbol]
+                );
+                const currentCryptoQty = parseInt(openCryptoForSymbol[0]?.total_qty || 0);
+                if (currentCryptoQty + qtyNum > cryptoMaxLotScrip) {
+                    return res.status(400).json({
+                        message: `Max lot size for ${symbol} (CRYPTO) is ${cryptoMaxLotScrip}`
+                    });
+                }
             }
 
             // Check max position size
@@ -948,8 +1026,13 @@ const getTrades = async (req, res) => {
         } else {
             // Role-based visibility logic for global list
             if (req.user.role === 'SUPERADMIN') {
-                // Superadmins can see everything
-                console.log('[getTrades] SUPERADMIN viewing all trades');
+                // Superadmins see trades they created OR trades of their direct children/clients
+                query += ` AND (t.created_by = ? OR t.user_id IN (
+                    SELECT u.id FROM users u 
+                    LEFT JOIN client_settings cs ON u.id = cs.user_id 
+                    WHERE u.parent_id = ? OR cs.broker_id = ?
+                ))`;
+                params.push(req.user.id, req.user.id, req.user.id);
             } else if (req.user.role === 'ADMIN') {
                 // Admins see their own created trades OR trades of their descendants
                 query += ` AND (t.created_by = ? OR t.user_id IN (
@@ -1165,18 +1248,25 @@ const closeTrade = async (req, res) => {
         let minTimeSeconds = 0;
         if (trade.market_type === 'MCX') minTimeSeconds = parseInt(clientConfig.mcxMinTimeToBookProfit || 0);
         else if (trade.market_type === 'EQUITY') minTimeSeconds = parseInt(clientConfig.equityMinTimeToBookProfit || 0);
+        else if (trade.market_type === 'OPTIONS') minTimeSeconds = parseInt(clientConfig.optionsMinTimeToBookProfit || 0);
+        else if (trade.market_type === 'CRYPTO') minTimeSeconds = parseInt((clientConfig.cryptoConfig || {}).minTimeToBookProfit || 0);
+        else if (trade.market_type === 'FOREX') minTimeSeconds = parseInt((clientConfig.forexConfig || {}).minTimeToBookProfit || 0);
+        else if (trade.market_type === 'COMEX') minTimeSeconds = parseInt((clientConfig.comexConfig || {}).minTimeToBookProfit || 0);
 
         const entryTime = new Date(trade.entry_time);
         const now = new Date();
         const secondsHeld = Math.floor((now - entryTime) / 1000);
+        const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
+        const lotSize = (scripRows.length > 0) ? parseFloat(scripRows[0].lot_size || 1) : 1;
+
         const currentPrice = exitPrice || mockEngine.getPrice(trade.symbol) || trade.entry_price;
         const pnl = trade.type === 'BUY'
-            ? (currentPrice - trade.entry_price) * trade.qty
-            : (trade.entry_price - currentPrice) * trade.qty;
+            ? (currentPrice - trade.entry_price) * trade.qty * lotSize
+            : (trade.entry_price - currentPrice) * trade.qty * lotSize;
 
         if (pnl > 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
             return res.status(400).json({
-                message: `Minimum profit booking time is ${minTimeSeconds} seconds.`,
+                message: `Minimum profit booking time is ${minTimeSeconds} seconds. Please wait ${minTimeSeconds - secondsHeld} more second(s).`,
                 remainingSeconds: minTimeSeconds - secondsHeld
             });
         }
@@ -1185,10 +1275,16 @@ const closeTrade = async (req, res) => {
         if (trade.market_type === 'MCX') scalpingStopLossEnabled = clientConfig.mcxScalpingStopLoss === 'Enabled';
         else if (trade.market_type === 'EQUITY') scalpingStopLossEnabled = clientConfig.equityScalpingStopLoss === 'Enabled';
         else if (trade.market_type === 'OPTIONS') scalpingStopLossEnabled = clientConfig.optionsScalpingStopLoss === 'Enabled';
+        else if (trade.market_type === 'CRYPTO') scalpingStopLossEnabled = (clientConfig.cryptoConfig || {}).scalpingStopLoss === 'Enabled';
+        else if (trade.market_type === 'FOREX') scalpingStopLossEnabled = (clientConfig.forexConfig || {}).scalpingStopLoss === 'Enabled';
+        else if (trade.market_type === 'COMEX') scalpingStopLossEnabled = (clientConfig.comexConfig || {}).scalpingStopLoss === 'Enabled';
 
-        if (scalpingStopLossEnabled && pnl < 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
+        // If Scalping SL is DISABLED → loss booking bhi min time ke baad hi hogi
+        // If Scalping SL is ENABLED → loss booking kisi bhi time kar sakte
+        if (!scalpingStopLossEnabled && pnl < 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
             return res.status(400).json({
-                message: `Scalping stop loss is enabled. Cannot close in loss before ${minTimeSeconds}s.`
+                message: `Cannot close in loss before minimum time (${minTimeSeconds}s). Please wait ${minTimeSeconds - secondsHeld} more second(s).`,
+                remainingSeconds: minTimeSeconds - secondsHeld
             });
         }
 

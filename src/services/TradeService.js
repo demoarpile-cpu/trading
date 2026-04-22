@@ -49,15 +49,32 @@ class TradeService {
             }
 
             // 3. Normal Market Order Closure
+            // Get lot_size from scrip_data for accurate P/L
+            const [scripRows] = await connection.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
+            const lotSize = (scripRows.length > 0) ? parseFloat(scripRows[0].lot_size || 1) : 1;
+
             const finalExitPrice = exitPrice || mockEngine.getPrice(trade.symbol) || trade.entry_price;
             const pnl = trade.type === 'BUY'
-                ? (finalExitPrice - trade.entry_price) * trade.qty
-                : (trade.entry_price - finalExitPrice) * trade.qty;
+                ? (finalExitPrice - trade.entry_price) * trade.qty * lotSize
+                : (trade.entry_price - finalExitPrice) * trade.qty * lotSize;
 
             // 4. Calculate Brokerage & Swap
             let brokerage = 0;
             let swap = 0;
             let brokerSwapRate = 5;
+
+            // Helper: calculate brokerage based on type
+            const calcBrokerage = (brokerageVal, brokerageType, qty, exitPrice, entryPrice) => {
+                const rate = parseFloat(brokerageVal || 0);
+                if (rate <= 0) return 0;
+                if (brokerageType === 'per_lot') {
+                    return qty * rate;
+                } else {
+                    // per_crore: brokerage on turnover (entry + exit turnover combined)
+                    const turnover = (entryPrice + exitPrice) * qty;
+                    return (turnover / 10000000) * rate;
+                }
+            };
 
             // Segment-specific brokerage
             if (trade.broker_id) {
@@ -77,12 +94,6 @@ class TradeService {
                         brokeragePerLot = parseFloat(clientConfig.brokerOptionsEquityBrokerage || 0);
                     }
                     brokerage = trade.qty * brokeragePerLot;
-                } else if (trade.market_type === 'COMEX') {
-                    brokerage = trade.qty * parseFloat(clientConfig.brokerComexBrokerage || 0);
-                } else if (trade.market_type === 'FOREX') {
-                    brokerage = trade.qty * parseFloat(clientConfig.brokerForexBrokerage || 0);
-                } else if (trade.market_type === 'CRYPTO') {
-                    brokerage = trade.qty * parseFloat(clientConfig.brokerCryptoBrokerage || 0);
                 }
 
                 // Swap Calculation
@@ -94,6 +105,40 @@ class TradeService {
                 if ((trade.market_type === 'MCX' || trade.market_type === 'EQUITY') && daysHeld > 1) {
                     swap = trade.qty * brokerSwapRate * (daysHeld - 1);
                 }
+            }
+
+            // ─── Client's Own Segment Brokerage (Crypto / Forex / Comex) ────────────────────
+            // These segments use client's own brokerage config (set at client creation)
+            if (trade.market_type === 'CRYPTO') {
+                const cryptoCfg = clientConfig.cryptoConfig || {};
+                brokerage = calcBrokerage(
+                    cryptoCfg.brokerage,
+                    cryptoCfg.brokerageType || 'per_crore',
+                    trade.qty,
+                    finalExitPrice,
+                    trade.entry_price
+                );
+                console.log(`[TradeService] CRYPTO Brokerage: Rate=${cryptoCfg.brokerage}, Type=${cryptoCfg.brokerageType}, Calculated=${brokerage.toFixed(2)}`);
+            } else if (trade.market_type === 'FOREX') {
+                const forexCfg = clientConfig.forexConfig || {};
+                brokerage = calcBrokerage(
+                    forexCfg.brokerage,
+                    forexCfg.brokerageType || 'per_crore',
+                    trade.qty,
+                    finalExitPrice,
+                    trade.entry_price
+                );
+                console.log(`[TradeService] FOREX Brokerage: Rate=${forexCfg.brokerage}, Type=${forexCfg.brokerageType}, Calculated=${brokerage.toFixed(2)}`);
+            } else if (trade.market_type === 'COMEX') {
+                const comexCfg = clientConfig.comexConfig || {};
+                brokerage = calcBrokerage(
+                    comexCfg.brokerage,
+                    comexCfg.brokerageType || 'per_crore',
+                    trade.qty,
+                    finalExitPrice,
+                    trade.entry_price
+                );
+                console.log(`[TradeService] COMEX Brokerage: Rate=${comexCfg.brokerage}, Type=${comexCfg.brokerageType}, Calculated=${brokerage.toFixed(2)}`);
             }
 
             // 5. Update Database
