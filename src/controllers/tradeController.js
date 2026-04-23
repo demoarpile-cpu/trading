@@ -496,6 +496,13 @@ const placeOrder = async (req, res) => {
             }
         }
 
+        // 7. Calculate Margin Required with Lot Size
+        let lotSize = 1;
+        try {
+            const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [symbol]);
+            if (scripRows.length > 0) lotSize = parseFloat(scripRows[0].lot_size || 1);
+        } catch (e) { console.error('Error fetching lotSize for margin:', e); }
+
         // MCX Intraday/Holding Exposure
         if (marketType === 'MCX') {
             const baseScrip = getMcxBaseScrip(symbol);
@@ -512,7 +519,7 @@ const placeOrder = async (req, res) => {
             } else {
                 // Priority 2: Global Exposure-based Calculation
                 const exposureValue = parseInt(clientConfig.mcxIntradayMargin || 500);
-                const turnover = executionPrice * qtyNum;
+                const turnover = executionPrice * qtyNum * lotSize; // Added lotSize
                 const exposureType = clientConfig.exposureMcxType || 'Per Turnover Basis';
 
                 if (exposureType === 'Per Turnover Basis') {
@@ -527,7 +534,7 @@ const placeOrder = async (req, res) => {
         // EQUITY Intraday/Holding Exposure
         if (marketType === 'EQUITY') {
             const exposureValue = parseInt(clientConfig.equityIntradayMargin || 500);
-            const turnover = executionPrice * qtyNum;
+            const turnover = executionPrice * qtyNum * lotSize; // Added lotSize
 
             marginRequired = turnover / exposureValue;
             console.log(`[placeOrder] ✅ EQUITY Exposure: Turnover=${turnover}, Exposure=${exposureValue}, MarginRequired=${marginRequired.toFixed(2)}`);
@@ -537,7 +544,7 @@ const placeOrder = async (req, res) => {
         if (marketType === 'CRYPTO' && clientConfig.cryptoTrading) {
             const cryptoConfig = clientConfig.cryptoConfig || {};
             const exposureValue = parseInt(cryptoConfig.intradayMargin || 0);
-            const turnover = executionPrice * qtyNum;
+            const turnover = executionPrice * qtyNum * lotSize; // Added lotSize
             if (exposureValue > 1) {
                 marginRequired = turnover / exposureValue;
             } else {
@@ -550,7 +557,7 @@ const placeOrder = async (req, res) => {
         if (marketType === 'FOREX' && clientConfig.forexTrading) {
             const forexConfig = clientConfig.forexConfig || {};
             const exposureValue = parseInt(forexConfig.intradayMargin || 0);
-            const turnover = executionPrice * qtyNum;
+            const turnover = executionPrice * qtyNum * lotSize; // Added lotSize
             if (exposureValue > 1) {
                 marginRequired = turnover / exposureValue;
             } else {
@@ -563,7 +570,7 @@ const placeOrder = async (req, res) => {
         if (marketType === 'COMEX' && clientConfig.comexTrading) {
             const comexConfig = clientConfig.comexConfig || {};
             const exposureValue = parseInt(comexConfig.intradayMargin || 0);
-            const turnover = executionPrice * qtyNum;
+            const turnover = executionPrice * qtyNum * lotSize; // Added lotSize
             if (exposureValue > 1) {
                 marginRequired = turnover / exposureValue;
             } else {
@@ -574,7 +581,7 @@ const placeOrder = async (req, res) => {
 
         // Fallback if no exposure calculated
         if (marginRequired <= 0) {
-            marginRequired = (executionPrice * qtyNum) * 0.1; // 10% default
+            marginRequired = (executionPrice * qtyNum * lotSize) * 0.1; // 10% default
         }
 
         // 8. Balance Check with calculated margin
@@ -1380,9 +1387,15 @@ const updateTrade = async (req, res) => {
             updates.push('qty = ?');
             params.push(newQty);
 
-            // Recalculate margin: price * qty * 0.1
+            // Recalculate margin: price * qty * lotSize * 0.1
+            let lotSize = 1;
+            try {
+                const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
+                if (scripRows.length > 0) lotSize = parseFloat(scripRows[0].lot_size || 1);
+            } catch (e) {}
+
             const price = entry_price ? parseFloat(entry_price) : parseFloat(trade.entry_price);
-            const newMargin = price * newQty * 0.1;
+            const newMargin = price * newQty * lotSize * 0.1;
             const oldMargin = parseFloat(trade.margin_used || 0);
             const marginDiff = newMargin - oldMargin;
 
