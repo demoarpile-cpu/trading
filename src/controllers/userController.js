@@ -98,7 +98,16 @@ const getUsers = async (req, res) => {
 
 const getUserProfile = async (req, res) => {
     try {
-        const [userRows] = await db.execute('SELECT * FROM users WHERE id = ?', [req.params.id]);
+        const [userRows] = await db.execute(`
+            SELECT 
+                u.*,
+                IFNULL((SELECT SUM(pnl) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as gross_pl,
+                IFNULL((SELECT SUM(brokerage) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as brokerage,
+                IFNULL((SELECT SUM(swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as swap_charges,
+                IFNULL((SELECT SUM(pnl - brokerage - swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as net_pl
+            FROM users u 
+            WHERE u.id = ?
+        `, [req.params.id]);
         if (userRows.length === 0) return res.status(404).json({ message: 'User not found' });
 
         const [settingsRows] = await db.execute('SELECT * FROM client_settings WHERE user_id = ?', [req.params.id]);
