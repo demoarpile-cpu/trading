@@ -336,6 +336,8 @@ const runMigrations = async () => {
     try { await db.execute(`ALTER TABLE scrip_data MODIFY COLUMN market_type ENUM('MCX','EQUITY','COMEX','FOREX','CRYPTO','NFO') DEFAULT 'MCX'`); } catch(_) {}
 
     // Seed ALL curated scrips (NIFTY50 + BANKNIFTY + MIDCAP + FINNIFTY + MCX + NFO)
+    // Scrips are now managed via market_groups and market_group_items for watchlist purposes.
+    // The scrip_data table remains for core instrument overrides (lot size, margin).
     const seedScrips = [
         // ── MCX Normal ──
         ['GOLD',1,100,'MCX'],['GOLDM',1,50,'MCX'],['GOLDPETAL',1,30,'MCX'],['GOLDGUINEA',1,30,'MCX'],
@@ -366,23 +368,6 @@ const runMigrations = async () => {
         ['TATAMOTORS',1,50,'EQUITY'],['TATASTEEL',1,50,'EQUITY'],['TCS',1,50,'EQUITY'],
         ['TECHM',1,50,'EQUITY'],['TITAN',1,50,'EQUITY'],['TRENT',1,50,'EQUITY'],
         ['ULTRACEMCO',1,50,'EQUITY'],['WIPRO',1,50,'EQUITY'],
-        // ── BANK NIFTY extras (not in NIFTY50) ──
-        ['BANKBARODA',1,50,'EQUITY'],['PNB',1,50,'EQUITY'],['FEDERALBNK',1,50,'EQUITY'],
-        ['IDFCFIRSTB',1,50,'EQUITY'],['BANDHANBNK',1,50,'EQUITY'],['AUBANK',1,50,'EQUITY'],
-        // ── MIDCAP SELECT extras ──
-        ['ABBOTINDIA',1,50,'EQUITY'],['ALKEM',1,50,'EQUITY'],['AUROPHARMA',1,50,'EQUITY'],
-        ['CANBK',1,50,'EQUITY'],['COFORGE',1,50,'EQUITY'],['COLPAL',1,50,'EQUITY'],
-        ['CONCOR',1,50,'EQUITY'],['CUMMINSIND',1,50,'EQUITY'],['DELHIVERY',1,50,'EQUITY'],
-        ['DIXON',1,50,'EQUITY'],['GODREJPROP',1,50,'EQUITY'],['INDHOTEL',1,50,'EQUITY'],
-        ['IRCTC',1,50,'EQUITY'],['JSPL',1,50,'EQUITY'],['JUBLFOOD',1,50,'EQUITY'],
-        ['LINDEINDIA',1,50,'EQUITY'],['LTIM',1,50,'EQUITY'],['LUPIN',1,50,'EQUITY'],
-        ['MAXHEALTH',1,50,'EQUITY'],['OBEROIRLTY',1,50,'EQUITY'],['PERSISTENT',1,50,'EQUITY'],
-        ['PIIND',1,50,'EQUITY'],['POLYCAB',1,50,'EQUITY'],['VOLTAS',1,50,'EQUITY'],
-        // ── FIN NIFTY extras ──
-        ['ICICIPRULI',1,50,'EQUITY'],['MUTHOOTFIN',1,50,'EQUITY'],['CHOLAFIN',1,50,'EQUITY'],
-        ['MANAPPURAM',1,50,'EQUITY'],['PFC',1,50,'EQUITY'],['RECLTD',1,50,'EQUITY'],
-        ['LICHSGFIN',1,50,'EQUITY'],['MFSL',1,50,'EQUITY'],['SBICARD',1,50,'EQUITY'],
-        ['M&MFIN',1,50,'EQUITY'],
         // ── NFO Index Futures ──
         ['NIFTY',1,50,'NFO'],['BANKNIFTY',1,50,'NFO'],['FINNIFTY',1,50,'NFO'],['MIDCPNIFTY',1,50,'NFO'],
     ];
@@ -702,7 +687,122 @@ const runMigrations = async () => {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
-    // ─── 15. NEW CLIENT BANK SETTINGS ──────────────────────────────────────────
+    // ─── 15. MARKET WATCH & SCRIP GROUPS ──────────────────────────────────────
+    
+    await db.execute(`
+        CREATE TABLE IF NOT EXISTS market_groups (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            name        VARCHAR(100) NOT NULL UNIQUE,
+            type        VARCHAR(50) DEFAULT 'WATCHLIST',
+            is_active   TINYINT(1) DEFAULT 1,
+            sort_order  INT DEFAULT 0
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await db.execute(`
+        CREATE TABLE IF NOT EXISTS market_group_items (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            group_id    INT NOT NULL,
+            symbol      VARCHAR(100) NOT NULL,
+            name        VARCHAR(100) DEFAULT NULL,
+            category    VARCHAR(50) DEFAULT NULL,
+            exchange    VARCHAR(20) DEFAULT 'NSE',
+            sort_order  INT DEFAULT 0,
+            UNIQUE KEY uq_group_symbol (group_id, symbol, exchange),
+            CONSTRAINT fk_mgi_group FOREIGN KEY (group_id) REFERENCES market_groups(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await addColumn('market_group_items', 'name', 'VARCHAR(100) DEFAULT NULL AFTER symbol');
+    await addColumn('market_group_items', 'category', 'VARCHAR(50) DEFAULT NULL AFTER name');
+
+    // Seed Market Groups
+    const groups = [
+        ['NIFTY 50', 'NSE_STOCKS', 1],
+        ['BANK NIFTY', 'NSE_STOCKS', 2],
+        ['MIDCAP SELECT', 'NSE_STOCKS', 3],
+        ['FIN NIFTY', 'NSE_STOCKS', 4],
+        ['MCX FUTURES', 'MCX_FUT', 5],
+        ['NFO INDICES', 'NFO_FUT', 6],
+        ['CRYPTO', 'CRYPTO', 7],
+        ['FOREX', 'FOREX', 8],
+        ['NSE INDICES', 'NSE_INDICES', 9]
+    ];
+
+    for (const [name, type, order] of groups) {
+        await db.execute('INSERT IGNORE INTO market_groups (name, type, sort_order) VALUES (?, ?, ?)', [name, type, order]);
+    }
+
+    // Get Group IDs for seeding items
+    const [groupRows] = await db.execute('SELECT id, name FROM market_groups');
+    const groupMap = {};
+    groupRows.forEach(r => groupMap[r.name] = r.id);
+
+    // Seed Items (only if group exists)
+    const seedGroupItems = async (groupName, items, exchange = 'NSE') => {
+        const gid = groupMap[groupName];
+        if (!gid) return;
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const symbol = typeof item === 'string' ? item : item.symbol;
+            const name = item.name || null;
+            const category = item.category || null;
+            await db.execute(`
+                INSERT IGNORE INTO market_group_items (group_id, symbol, name, category, exchange, sort_order) 
+                VALUES (?, ?, ?, ?, ?, ?)
+            `, [gid, symbol, name, category, exchange, i]);
+        }
+    };
+
+    // Symbol Lists (Moved from hardcoded arrays)
+    const n50 = ['ADANIPORTS', 'APOLLOHOSP', 'ASIANPAINT', 'AXISBANK', 'BAJAJ-AUTO', 'BAJFINANCE', 'BAJAJFINSV', 'BEL', 'BHARTIARTL', 'BPCL', 'BRITANNIA', 'CIPLA', 'COALINDIA', 'DIVISLAB', 'DRREDDY', 'EICHERMOT', 'GRASIM', 'HCLTECH', 'HDFCBANK', 'HDFCLIFE', 'HEROMOTOCO', 'HINDALCO', 'HINDUNILVR', 'ICICIBANK', 'INDUSINDBK', 'INFY', 'ITC', 'JSWSTEEL', 'KOTAKBANK', 'LT', 'M&M', 'MARUTI', 'NESTLEIND', 'NTPC', 'ONGC', 'POWERGRID', 'RELIANCE', 'SBILIFE', 'SBIN', 'SHRIRAMFIN', 'SUNPHARMA', 'TATACONSUM', 'TATAMOTORS', 'TATASTEEL', 'TCS', 'TECHM', 'TITAN', 'TRENT', 'ULTRACEMCO', 'WIPRO'];
+    const bn = ['HDFCBANK', 'ICICIBANK', 'SBIN', 'KOTAKBANK', 'AXISBANK', 'INDUSINDBK', 'BANKBARODA', 'PNB', 'FEDERALBNK', 'IDFCFIRSTB', 'BANDHANBNK', 'AUBANK'];
+    const mc = ['ABBOTINDIA', 'ALKEM', 'AUROPHARMA', 'CANBK', 'COFORGE', 'COLPAL', 'CONCOR', 'CUMMINSIND', 'DELHIVERY', 'DIXON', 'FEDERALBNK', 'GODREJPROP', 'INDHOTEL', 'IRCTC', 'JSPL', 'JUBLFOOD', 'LINDEINDIA', 'LTIM', 'LUPIN', 'MAXHEALTH', 'OBEROIRLTY', 'PERSISTENT', 'PIIND', 'POLYCAB', 'VOLTAS'];
+    const fn = ['HDFCBANK', 'ICICIBANK', 'SBIN', 'KOTAKBANK', 'AXISBANK', 'BAJFINANCE', 'BAJAJFINSV', 'HDFCLIFE', 'SBILIFE', 'ICICIPRULI', 'MUTHOOTFIN', 'CHOLAFIN', 'SHRIRAMFIN', 'MANAPPURAM', 'PFC', 'RECLTD', 'LICHSGFIN', 'MFSL', 'SBICARD', 'M&MFIN'];
+    const mcx = ['GOLD', 'GOLDM', 'GOLDPETAL', 'GOLDGUINEA', 'SILVER', 'SILVERM', 'SILVERMICRO', 'CRUDEOIL', 'CRUDEOILM', 'NATURALGAS', 'NATGASMINI', 'COPPER', 'COPPERM', 'ZINC', 'ZINCMINI', 'LEAD', 'LEADMINI', 'NICKEL', 'NICKELMINI', 'ALUMINIUM', 'ALUMINI', 'MENTHAOIL', 'COTTON', 'COTTONCNDY'];
+    const nfoIdx = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'];
+    const crypto = [
+        { symbol: 'BTC/USD', name: 'Bitcoin', category: 'crypto' },
+        { symbol: 'ETH/USD', name: 'Ethereum', category: 'crypto' },
+        { symbol: 'BNB/USD', name: 'BNB', category: 'crypto' },
+        { symbol: 'SOL/USD', name: 'Solana', category: 'crypto' },
+        { symbol: 'XRP/USD', name: 'Ripple', category: 'crypto' },
+        { symbol: 'ADA/USD', name: 'Cardano', category: 'crypto' },
+        { symbol: 'DOGE/USD', name: 'Dogecoin', category: 'crypto' },
+        { symbol: 'DOT/USD', name: 'Polkadot', category: 'crypto' },
+        { symbol: 'MATIC/USD', name: 'Polygon', category: 'crypto' },
+        { symbol: 'AVAX/USD', name: 'Avalanche', category: 'crypto' }
+    ];
+    const forex = [
+        { symbol: 'XAU/USD', name: 'Gold', category: 'commodity' },
+        { symbol: 'XAG/USD', name: 'Silver', category: 'commodity' },
+        { symbol: 'USD/INR', name: 'USD/INR', category: 'forex' },
+        { symbol: 'EUR/INR', name: 'EUR/INR', category: 'forex' },
+        { symbol: 'GBP/USD', name: 'GBP/USD', category: 'forex' },
+        { symbol: 'USD/JPY', name: 'USD/JPY', category: 'forex' },
+        { symbol: 'USD/CHF', name: 'USD/CHF', category: 'forex' },
+        { symbol: 'AUD/CAD', name: 'AUD/CAD', category: 'forex' },
+        { symbol: 'EUR/USD', name: 'EUR/USD', category: 'forex' },
+        { symbol: 'GBP/INR', name: 'GBP/INR', category: 'forex' }
+    ];
+    const nseInd = [
+        { symbol: 'NIFTY 50', name: 'NIFTY 50' },
+        { symbol: 'NIFTY BANK', name: 'NIFTY BANK' },
+        { symbol: 'NIFTY FIN SERVICE', name: 'NIFTY FIN SERVICE' },
+        { symbol: 'NIFTY MID SELECT', name: 'NIFTY MID SELECT' }
+    ];
+
+    await seedGroupItems('NIFTY 50', n50, 'NSE');
+    await seedGroupItems('BANK NIFTY', bn, 'NSE');
+    await seedGroupItems('MIDCAP SELECT', mc, 'NSE');
+    await seedGroupItems('FIN NIFTY', fn, 'NSE');
+    await seedGroupItems('MCX FUTURES', mcx, 'MCX');
+    await seedGroupItems('NFO INDICES', nfoIdx, 'NFO');
+    await seedGroupItems('CRYPTO', crypto, 'CRYPTO');
+    await seedGroupItems('FOREX', forex, 'FOREX');
+    await seedGroupItems('NSE INDICES', nseInd, 'NSE');
+
+    // ─── 16. NEW CLIENT BANK SETTINGS ──────────────────────────────────────────
 
     await db.execute(`
         CREATE TABLE IF NOT EXISTS new_client_bank (

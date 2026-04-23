@@ -127,18 +127,52 @@ const WATCHLIST_CACHE_BUST = 'watchlist_v4_nfo_index_opts';
 /** NFO index options included in unified watchlist (instruments + quotes from Kite only). */
 const NFO_INDEX_OPTION_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY']);
 
-const NIFTY50 = [
-    'ADANIPORTS', 'APOLLOHOSP', 'ASIANPAINT', 'AXISBANK', 'BAJAJ-AUTO',
-    'BAJFINANCE', 'BAJAJFINSV', 'BEL', 'BHARTIARTL', 'BPCL',
-    'BRITANNIA', 'CIPLA', 'COALINDIA', 'DIVISLAB', 'DRREDDY',
-    'EICHERMOT', 'GRASIM', 'HCLTECH', 'HDFCBANK', 'HDFCLIFE',
-    'HEROMOTOCO', 'HINDALCO', 'HINDUNILVR', 'ICICIBANK', 'INDUSINDBK',
-    'INFY', 'ITC', 'JSWSTEEL', 'KOTAKBANK', 'LT',
-    'M&M', 'MARUTI', 'NESTLEIND', 'NTPC', 'ONGC',
-    'POWERGRID', 'RELIANCE', 'SBILIFE', 'SBIN', 'SHRIRAMFIN',
-    'SUNPHARMA', 'TATACONSUM', 'TATAMOTORS', 'TATASTEEL', 'TCS',
-    'TECHM', 'TITAN', 'TRENT', 'ULTRACEMCO', 'WIPRO'
-];
+let NIFTY50 = [];
+let BANKNIFTY = [];
+let MIDCAP = [];
+let FINNIFTY = [];
+let ALL_NSE_STOCKS = [];
+let MCX_BASES = [];
+let NFO_INDICES = [];
+let NSE_INDICES = [];
+
+const db = require('../config/db');
+
+async function loadGroupsFromDb() {
+    try {
+        const [rows] = await db.execute(`
+            SELECT mg.name as group_name, mgi.symbol 
+            FROM market_group_items mgi
+            JOIN market_groups mg ON mgi.group_id = mg.id
+            WHERE mg.is_active = 1
+        `);
+
+        const groups = {};
+        rows.forEach(r => {
+            if (!groups[r.group_name]) groups[r.group_name] = [];
+            groups[r.group_name].push(r.symbol);
+        });
+
+        NIFTY50 = groups['NIFTY 50'] || [];
+        BANKNIFTY = groups['BANK NIFTY'] || [];
+        MIDCAP = groups['MIDCAP SELECT'] || [];
+        FINNIFTY = groups['FIN NIFTY'] || [];
+        MCX_BASES = groups['MCX FUTURES'] || [];
+        NFO_INDICES = groups['NFO INDICES'] || [];
+        NSE_INDICES = (groups['NSE INDICES'] || []).map(s => `NSE:${s}`);
+        
+        ALL_NSE_STOCKS = [...new Set([...NIFTY50, ...BANKNIFTY, ...MIDCAP, ...FINNIFTY])];
+
+        console.log(`✅ Loaded Market Groups from DB: N50(${NIFTY50.length}), BN(${BANKNIFTY.length}), MCX(${MCX_BASES.length}), INDICES(${NSE_INDICES.length})`);
+    } catch (err) {
+        console.error('❌ Failed to load market groups from DB:', err.message);
+    }
+}
+
+// Initial load
+loadGroupsFromDb();
+// Refresh every 5 minutes
+setInterval(loadGroupsFromDb, 5 * 60 * 1000);
 
 let _userNseEquityWatchlist = null;
 function loadUserNseEquityWatchlist() {
@@ -155,48 +189,7 @@ function loadUserNseEquityWatchlist() {
     return _userNseEquityWatchlist;
 }
 
-// ── NIFTY BANK (12 banking stocks) ──
-const BANKNIFTY = [
-    'HDFCBANK', 'ICICIBANK', 'SBIN', 'KOTAKBANK', 'AXISBANK', 'INDUSINDBK',
-    'BANKBARODA', 'PNB', 'FEDERALBNK', 'IDFCFIRSTB', 'BANDHANBNK', 'AUBANK'
-];
 
-// ── NIFTY MIDCAP SELECT (25 stocks — official list, Zerodha exact symbols) ──
-const MIDCAP = [
-    'ABBOTINDIA', 'ALKEM', 'AUROPHARMA', 'CANBK', 'COFORGE',
-    'COLPAL', 'CONCOR', 'CUMMINSIND', 'DELHIVERY', 'DIXON',
-    'FEDERALBNK', 'GODREJPROP', 'INDHOTEL', 'IRCTC', 'JSPL',
-    'JUBLFOOD', 'LINDEINDIA', 'LTIM', 'LUPIN', 'MAXHEALTH',
-    'OBEROIRLTY', 'PERSISTENT', 'PIIND', 'POLYCAB', 'VOLTAS'
-];
-
-// ── NIFTY FINANCIAL SERVICES (20 stocks) ──
-const FINNIFTY = [
-    'HDFCBANK', 'ICICIBANK', 'SBIN', 'KOTAKBANK', 'AXISBANK', 'BAJFINANCE',
-    'BAJAJFINSV', 'HDFCLIFE', 'SBILIFE', 'ICICIPRULI', 'MUTHOOTFIN', 'CHOLAFIN',
-    'SHRIRAMFIN', 'MANAPPURAM', 'PFC', 'RECLTD', 'LICHSGFIN', 'MFSL',
-    'SBICARD', 'M&MFIN'
-];
-
-// ── All NSE stocks deduplicated ──
-const ALL_NSE_STOCKS = [...new Set([...NIFTY50, ...BANKNIFTY, ...MIDCAP, ...FINNIFTY])];
-
-// ── MCX commodities (normal + mini combined) ──
-const MCX_BASES = [
-    'GOLD', 'GOLDM', 'GOLDPETAL', 'GOLDGUINEA',
-    'SILVER', 'SILVERM', 'SILVERMICRO',
-    'CRUDEOIL', 'CRUDEOILM',
-    'NATURALGAS', 'NATGASMINI',
-    'COPPER', 'COPPERM',
-    'ZINC', 'ZINCMINI',
-    'LEAD', 'LEADMINI',
-    'NICKEL', 'NICKELMINI',
-    'ALUMINIUM', 'ALUMINI',
-    'MENTHAOIL', 'COTTON', 'COTTONCNDY'
-];
-
-// ── NFO Index Futures ──
-const NFO_INDICES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'];
 
 // Dashboard symbols cache (avoids rebuilding symbol lists every request)
 let dashboardSymbolsCache = null;
@@ -526,7 +519,7 @@ async function buildKiteDashboardPayload(userId) {
 
     // 1. Basic Symbols (Stocks + Indices)
     const nseStocks = ALL_NSE_STOCKS.map(s => `NSE:${s}`);
-    const nseIndices = ['NSE:NIFTY 50', 'NSE:NIFTY BANK', 'NSE:NIFTY FIN SERVICE', 'NSE:NIFTY MID SELECT'];
+    const nseIndices = NSE_INDICES.length > 0 ? NSE_INDICES : ['NSE:NIFTY 50', 'NSE:NIFTY BANK', 'NSE:NIFTY FIN SERVICE', 'NSE:NIFTY MID SELECT'];
     
     // 2. Futures (from background cache)
     if (!dashboardSymbolsCache) await refreshDashboardSymbols().catch(() => {});
