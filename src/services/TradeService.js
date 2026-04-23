@@ -70,8 +70,8 @@ class TradeService {
                 if (brokerageType === 'per_lot') {
                     return qty * rate;
                 } else {
-                    // per_crore: brokerage on turnover (entry + exit turnover combined)
-                    const turnover = (entryPrice + exitPrice) * qty;
+                    // Ensure prices are numbers to avoid string concatenation (e.g. "0.98" + "0.97" = "0.980.97")
+                    const turnover = (parseFloat(entryPrice) + parseFloat(exitPrice)) * qty;
                     return (turnover / 10000000) * rate;
                 }
             };

@@ -33,9 +33,9 @@ const getUsers = async (req, res) => {
                 u.credit_limit,
                 IFNULL(ud.kyc_status, 'PENDING') as kycStatus,
                 IFNULL((SELECT SUM(pnl) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as gross_pl,
-                0.00 as brokerage,
-                0.00 as swap_charges,
-                IFNULL((SELECT SUM(pnl) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as net_pl,
+                IFNULL((SELECT SUM(brokerage) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as brokerage,
+                IFNULL((SELECT SUM(swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as swap_charges,
+                IFNULL((SELECT SUM(pnl - brokerage - swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as net_pl,
                 (SELECT COUNT(*) FROM trades WHERE user_id = u.id AND status = 'OPEN') as active_trades_count,
                 cs.config_json,
                 cs.broker_id
