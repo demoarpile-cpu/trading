@@ -785,9 +785,9 @@ function _getPrecomputed(instruments, query) {
     const nseKeys = nseSymbols.map((s) => `NSE:${s}`);
 
     // ── NFO underlyings ──
-    const nfoUnderlyings = String(query.nfoUnderlyings || `NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY,${NIFTY50.join(',')}`)
+    const nfoUnderlyings = String(query.nfoUnderlyings || 'NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY')
         .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
-    const nfoRange = parseInt(query.nfoRange) || 50000; // Increased default range to effectively show all strikes
+    const nfoRange = parseInt(query.nfoRange) || 50000;
 
     const indexSymbolMap = {
         NIFTY: 'NSE:NIFTY 50', BANKNIFTY: 'NSE:NIFTY BANK',
@@ -1303,6 +1303,14 @@ async function fetchFreshQuotes(symbols) {
         if (i + batchSize < symbols.length) await sleep(80);
     }
     return quotes;
+}
+
+function resolveNfoIndexSpotLtp(ltpQuotes, cfg) {
+    if (!ltpQuotes || !cfg) return 0;
+    const spot = ltpQuotes[cfg.idxKey]?.last_price || 0;
+    if (spot > 0) return spot;
+    const fut = ltpQuotes[cfg.futKey]?.last_price || 0;
+    return fut;
 }
 
 // Helper: format a quote into clean object

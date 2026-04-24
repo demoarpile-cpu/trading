@@ -67,36 +67,109 @@ class TradeService {
             const calcBrokerage = (brokerageVal, brokerageType, qty, exitPrice, entryPrice) => {
                 const rate = parseFloat(brokerageVal || 0);
                 if (rate <= 0) return 0;
-                if (brokerageType === 'per_lot') {
+                
+                const type = (brokerageType || 'PER_LOT').toUpperCase();
+                if (type === 'PER_LOT' || type === 'PER LOT') {
                     return qty * rate;
-                } else {
-                    // Ensure prices are numbers to avoid string concatenation (e.g. "0.98" + "0.97" = "0.980.97")
+                } else if (type === 'PER_CRORE' || type === 'PER CRORE') {
                     const turnover = (parseFloat(entryPrice) + parseFloat(exitPrice)) * qty;
                     return (turnover / 10000000) * rate;
+                } else {
+                    return qty * rate;
                 }
             };
 
-            // Segment-specific brokerage
-            if (trade.broker_id) {
-                if (trade.market_type === 'MCX') {
-                    const symbolBrokerage = (clientConfig.brokerMcxBrokerage || {})[trade.symbol];
-                    if (symbolBrokerage !== undefined) brokerage = trade.qty * parseFloat(symbolBrokerage);
-                } else if (trade.market_type === 'EQUITY') {
-                    const symbolBrokerage = (clientConfig.brokerEquityBrokerage || {})[trade.symbol];
-                    if (symbolBrokerage !== undefined) brokerage = trade.qty * parseFloat(symbolBrokerage);
-                } else if (trade.market_type === 'OPTIONS') {
-                    let brokeragePerLot = 0;
-                    if (trade.symbol.includes('NIFTY') || trade.symbol.includes('BANKNIFTY')) {
-                        brokeragePerLot = parseFloat(clientConfig.brokerOptionsIndexBrokerage || 0);
-                    } else if (trade.symbol.includes('MCX')) {
-                        brokeragePerLot = parseFloat(clientConfig.brokerOptionsMcxBrokerage || 0);
-                    } else {
-                        brokeragePerLot = parseFloat(clientConfig.brokerOptionsEquityBrokerage || 0);
-                    }
-                    brokerage = trade.qty * brokeragePerLot;
-                }
+            // Clean symbol (remove exchange prefix like "MCX:" and handle formats like GOLD26JUNFUT)
+            let rawSymbol = (trade.symbol || '').toUpperCase();
+            let cleanSymbol = rawSymbol.includes(':') ? rawSymbol.split(':')[1] : rawSymbol;
+            const mType = (trade.market_type || '').toUpperCase();
 
-                // Swap Calculation
+            // Try to find scrip-specific brokerage in client_settings config
+            let scripRate = undefined;
+
+            if (mType === 'MCX') {
+                const lotBrokerageMap = { ...clientConfig.mcxLotBrokerage, ...clientConfig.brokerMcxBrokerage };
+                // 1. Try exact match on clean symbol
+                if (lotBrokerageMap[cleanSymbol] !== undefined) {
+                    scripRate = parseFloat(lotBrokerageMap[cleanSymbol]);
+                } else {
+                    // 2. Try to find if any key in map is a prefix or part of cleanSymbol
+                    // Sort keys by length descending to match longest first (e.g., NATURALGAS MINI before NATURALGAS)
+                    const sortedKeys = Object.keys(lotBrokerageMap).sort((a, b) => b.length - a.length);
+                    for (const key of sortedKeys) {
+                        if (cleanSymbol.startsWith(key.toUpperCase().replace(/\s+/g, ''))) {
+                            scripRate = parseFloat(lotBrokerageMap[key]);
+                            break;
+                        }
+                    }
+                }
+            } else if (mType === 'EQUITY') {
+                const equityMap = clientConfig.brokerEquityBrokerage || {};
+                if (equityMap[cleanSymbol] !== undefined) {
+                    scripRate = parseFloat(equityMap[cleanSymbol]);
+                } else {
+                    const sortedKeys = Object.keys(equityMap).sort((a, b) => b.length - a.length);
+                    for (const key of sortedKeys) {
+                        if (cleanSymbol.startsWith(key.toUpperCase())) {
+                            scripRate = parseFloat(equityMap[key]);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (scripRate !== undefined && scripRate > 0) {
+                // Priority 1: Scrip-specific from config
+                brokerage = trade.qty * scripRate;
+                console.log(`[TradeService] Scrip-specific Brokerage: Raw=${rawSymbol}, Clean=${cleanSymbol}, Rate=${scripRate}, Calculated=${brokerage.toFixed(2)}`);
+            } else {
+                // Priority 2: Segment Settings from user_segments
+                const [segmentRows] = await connection.execute(
+                    'SELECT * FROM user_segments WHERE user_id = ? AND segment = ?',
+                    [trade.user_id, trade.market_type]
+                );
+
+                if (segmentRows.length > 0 && parseFloat(segmentRows[0].brokerage_value) > 0) {
+                    const seg = segmentRows[0];
+                    brokerage = calcBrokerage(seg.brokerage_value, seg.brokerage_type, trade.qty, finalExitPrice, trade.entry_price);
+                    console.log(`[TradeService] Segment ${trade.market_type} Brokerage: Rate=${seg.brokerage_value}, Type=${seg.brokerage_type}, Calculated=${brokerage.toFixed(2)}`);
+                } else {
+                    // Priority 3: General Fallback from client_settings
+                    if (mType === 'MCX') {
+                        const rate = parseFloat(clientConfig.brokerMcxBrokerage || clientConfig.mcxBrokerage || 0);
+                        brokerage = calcBrokerage(rate, clientConfig.mcxBrokerageType || 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price);
+                    } else if (mType === 'EQUITY') {
+                        const rate = parseFloat(clientConfig.brokerEquityBrokerage || clientConfig.equityBrokerage || 0);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price);
+                    } else if (mType === 'OPTIONS') {
+                        let rate = 0;
+                        if (cleanSymbol.includes('NIFTY') || cleanSymbol.includes('BANKNIFTY')) {
+                            rate = parseFloat(clientConfig.brokerOptionsIndexBrokerage || clientConfig.optionsIndexBrokerage || 20);
+                        } else if (mType === 'MCX' || cleanSymbol.includes('MCX')) {
+                            rate = parseFloat(clientConfig.brokerOptionsMcxBrokerage || clientConfig.optionsMcxBrokerage || 20);
+                        } else {
+                            rate = parseFloat(clientConfig.brokerOptionsEquityBrokerage || clientConfig.optionsEquityBrokerage || 20);
+                        }
+                        brokerage = trade.qty * rate;
+                    } else if (mType === 'COMEX') {
+                        const rate = parseFloat(clientConfig.comexBrokerage || 0);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price);
+                    } else if (mType === 'FOREX') {
+                        const rate = parseFloat(clientConfig.forexBrokerage || 0);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price);
+                    } else if (mType === 'CRYPTO') {
+                        const rate = parseFloat(clientConfig.cryptoBrokerage || 0);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price);
+                    }
+                    
+                    if (brokerage > 0) {
+                        console.log(`[TradeService] Fallback ${mType} Brokerage Calculated: ${brokerage.toFixed(2)}`);
+                    }
+                }
+            }
+
+            // Calculate Swap if applicable
+            if (trade.broker_id) {
                 const [brokerRows] = await connection.execute('SELECT swap_rate FROM broker_shares WHERE user_id = ?', [trade.broker_id]);
                 if (brokerRows.length > 0) brokerSwapRate = parseFloat(brokerRows[0].swap_rate || 5);
 
@@ -105,40 +178,6 @@ class TradeService {
                 if ((trade.market_type === 'MCX' || trade.market_type === 'EQUITY') && daysHeld > 1) {
                     swap = trade.qty * brokerSwapRate * (daysHeld - 1);
                 }
-            }
-
-            // ─── Client's Own Segment Brokerage (Crypto / Forex / Comex) ────────────────────
-            // These segments use client's own brokerage config (set at client creation)
-            if (trade.market_type === 'CRYPTO') {
-                const cryptoCfg = clientConfig.cryptoConfig || {};
-                brokerage = calcBrokerage(
-                    cryptoCfg.brokerage,
-                    cryptoCfg.brokerageType || 'per_crore',
-                    trade.qty,
-                    finalExitPrice,
-                    trade.entry_price
-                );
-                console.log(`[TradeService] CRYPTO Brokerage: Rate=${cryptoCfg.brokerage}, Type=${cryptoCfg.brokerageType}, Calculated=${brokerage.toFixed(2)}`);
-            } else if (trade.market_type === 'FOREX') {
-                const forexCfg = clientConfig.forexConfig || {};
-                brokerage = calcBrokerage(
-                    forexCfg.brokerage,
-                    forexCfg.brokerageType || 'per_crore',
-                    trade.qty,
-                    finalExitPrice,
-                    trade.entry_price
-                );
-                console.log(`[TradeService] FOREX Brokerage: Rate=${forexCfg.brokerage}, Type=${forexCfg.brokerageType}, Calculated=${brokerage.toFixed(2)}`);
-            } else if (trade.market_type === 'COMEX') {
-                const comexCfg = clientConfig.comexConfig || {};
-                brokerage = calcBrokerage(
-                    comexCfg.brokerage,
-                    comexCfg.brokerageType || 'per_crore',
-                    trade.qty,
-                    finalExitPrice,
-                    trade.entry_price
-                );
-                console.log(`[TradeService] COMEX Brokerage: Rate=${comexCfg.brokerage}, Type=${comexCfg.brokerageType}, Calculated=${brokerage.toFixed(2)}`);
             }
 
             // 5. Update Database

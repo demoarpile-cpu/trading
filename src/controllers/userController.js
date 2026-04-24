@@ -373,6 +373,34 @@ const updateClientSettings = async (req, res) => {
             brokerId || null
         ]);
 
+        // ─── SYNC to user_segments table for mobile app consistency ─────
+        if (configObj) {
+            const userId = req.params.id;
+            const segmentsToSync = [
+                { name: 'MCX', enabled: configObj.mcxTrading, bType: configObj.mcxBrokerageType, bVal: configObj.mcxBrokerage, maxLot: configObj.mcxMaxLotScrip, exp: configObj.mcxExposureMultiplier },
+                { name: 'EQUITY', enabled: configObj.equityTrading, bType: 'PER_LOT', bVal: configObj.equityBrokerage, maxLot: configObj.equityMaxScrip, exp: configObj.equityExposureMultiplier },
+                { name: 'OPTIONS', enabled: configObj.indexOptionsTrading || configObj.equityOptionsTrading, bType: configObj.optionsIndexBrokerageType, bVal: configObj.optionsIndexBrokerage, maxLot: configObj.optionsIndexMaxScrip, exp: 1 },
+                { name: 'COMEX', enabled: configObj.comexTrading, bType: 'PER_LOT', bVal: configObj.comexBrokerage, maxLot: configObj.maxLotComex, exp: 1 },
+                { name: 'FOREX', enabled: configObj.forexTrading, bType: 'PER_LOT', bVal: configObj.forexBrokerage, maxLot: configObj.maxLotForex, exp: 1 },
+                { name: 'CRYPTO', enabled: configObj.cryptoTrading, bType: 'PER_LOT', bVal: configObj.cryptoBrokerage, maxLot: configObj.maxLotCrypto, exp: 1 }
+            ];
+
+            for (const s of segmentsToSync) {
+                if (s.enabled !== undefined || s.bVal !== undefined) {
+                    await db.execute(`
+                        INSERT INTO user_segments (user_id, segment, is_enabled, brokerage_type, brokerage_value, max_lot_per_scrip, exposure_multiplier)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON DUPLICATE KEY UPDATE
+                            is_enabled = IFNULL(VALUES(is_enabled), is_enabled),
+                            brokerage_type = IFNULL(VALUES(brokerage_type), brokerage_type),
+                            brokerage_value = IFNULL(VALUES(brokerage_value), brokerage_value),
+                            max_lot_per_scrip = IFNULL(VALUES(max_lot_per_scrip), max_lot_per_scrip),
+                            exposure_multiplier = IFNULL(VALUES(exposure_multiplier), exposure_multiplier)
+                    `, [userId, s.name, s.enabled ? 1 : 0, s.bType || 'PER_LOT', s.bVal || 0, s.maxLot || 10, s.exp || 1]);
+                }
+            }
+        }
+
         res.json({ message: 'Client settings updated' });
     } catch (err) {
         console.error(err);
@@ -520,7 +548,39 @@ const updateDocuments = async (req, res) => {
 // ─── USER SEGMENTS ───────────────────────────────────
 const getUserSegments = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM user_segments WHERE user_id = ?', [req.params.id]);
+        let [rows] = await db.execute('SELECT * FROM user_segments WHERE user_id = ?', [req.params.id]);
+        
+        // Check if rows are all disabled and have 0 brokerage (typical for uninitialized or out-of-sync users)
+        const isDefault = rows.length > 0 && rows.every(r => r.is_enabled === 0 && parseFloat(r.brokerage_value) === 0);
+        
+        if (rows.length === 0 || isDefault) {
+            console.log(`[getUserSegments] Fallback: user_segments is default/empty for user ${req.params.id}. Checking client_settings...`);
+            const [settingsRows] = await db.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [req.params.id]);
+            
+            if (settingsRows.length > 0 && settingsRows[0].config_json) {
+                try {
+                    const config = JSON.parse(settingsRows[0].config_json);
+                    
+                    const mappedSegments = [
+                        { segment: 'MCX', is_enabled: config.mcxTrading ? 1 : 0, brokerage_type: config.mcxBrokerageType || 'PER_LOT', brokerage_value: config.mcxBrokerage || 0, max_lot_per_scrip: config.mcxMaxLotScrip || 0, exposure_multiplier: config.mcxExposureMultiplier || 1, auto_square_off: config.autoSquareOff === 'Yes' ? 1 : 0, square_off_time: config.expirySquareOffTime },
+                        { segment: 'EQUITY', is_enabled: config.equityTrading ? 1 : 0, brokerage_type: 'PER_LOT', brokerage_value: config.equityBrokerage || 0, max_lot_per_scrip: config.equityMaxScrip || 0, exposure_multiplier: config.equityExposureMultiplier || 1, auto_square_off: config.autoSquareOff === 'Yes' ? 1 : 0, square_off_time: config.expirySquareOffTime },
+                        { segment: 'OPTIONS', is_enabled: (config.indexOptionsTrading || config.equityOptionsTrading) ? 1 : 0, brokerage_type: config.optionsIndexBrokerageType || 'PER_LOT', brokerage_value: config.optionsIndexBrokerage || 0, max_lot_per_scrip: config.optionsIndexMaxScrip || 0, exposure_multiplier: 1, auto_square_off: config.autoSquareOff === 'Yes' ? 1 : 0, square_off_time: config.expirySquareOffTime },
+                        { segment: 'COMEX', is_enabled: config.comexTrading ? 1 : 0, brokerage_type: config.comexConfig?.brokerageType || 'PER_LOT', brokerage_value: config.comexConfig?.brokerage || 0, max_lot_per_scrip: config.comexConfig?.maxLotScrip || 0, exposure_multiplier: 1, auto_square_off: config.autoSquareOff === 'Yes' ? 1 : 0, square_off_time: config.expirySquareOffTime },
+                        { segment: 'FOREX', is_enabled: config.forexTrading ? 1 : 0, brokerage_type: config.forexConfig?.brokerageType || 'PER_LOT', brokerage_value: config.forexConfig?.brokerage || 0, max_lot_per_scrip: config.forexConfig?.maxLotScrip || 0, exposure_multiplier: 1, auto_square_off: config.autoSquareOff === 'Yes' ? 1 : 0, square_off_time: config.expirySquareOffTime },
+                        { segment: 'CRYPTO', is_enabled: config.cryptoTrading ? 1 : 0, brokerage_type: config.cryptoConfig?.brokerageType || 'PER_LOT', brokerage_value: config.cryptoConfig?.brokerage || 0, max_lot_per_scrip: config.cryptoConfig?.maxLotScrip || 0, exposure_multiplier: 1, auto_square_off: config.autoSquareOff === 'Yes' ? 1 : 0, square_off_time: config.expirySquareOffTime }
+                    ];
+                    
+                    const finalSegments = mappedSegments.filter(s => s.is_enabled === 1 || parseFloat(s.brokerage_value) > 0);
+
+                    if (finalSegments.length > 0) {
+                        return res.json(finalSegments);
+                    }
+                } catch (e) {
+                    console.error('[getUserSegments] Fallback parse failed:', e);
+                }
+            }
+        }
+        
         res.json(rows);
     } catch (err) {
         console.error(err);
@@ -667,27 +727,43 @@ const recalculateBrokerage = async (req, res) => {
             [userId]
         );
 
+        // Fetch all segment settings for this user once
+        const [segmentSettings] = await db.execute('SELECT * FROM user_segments WHERE user_id = ?', [userId]);
+        const segmentMap = {};
+        segmentSettings.forEach(s => segmentMap[s.segment] = s);
+
         let totalBrokerage = 0;
-        const brokerMcxBrokerage = config.brokerMcxBrokerage || config.mcxLotBrokerage || {};
 
         for (const trade of trades) {
             let brokerage = 0;
+            const seg = segmentMap[trade.market_type || 'MCX'];
 
-            // Try broker's lot-wise brokerage first
-            if (brokerMcxBrokerage[trade.symbol] !== undefined) {
-                brokerage = trade.qty * parseFloat(brokerMcxBrokerage[trade.symbol]);
-                console.log(`[recalcBrokerage] Symbol=${trade.symbol}, Qty=${trade.qty}, BrokeragePerLot=${brokerMcxBrokerage[trade.symbol]}, Total=${brokerage}`);
-            } else {
-                // Fallback to config
-                const brokeragePerLot = parseFloat(config.mcxBrokerage || 0);
-                const brokerageType = config.mcxBrokerageType || 'per_crore';
+            if (seg) {
+                const rate = parseFloat(seg.brokerage_value || 0);
+                const type = (seg.brokerage_type || 'PER_LOT').toUpperCase();
 
-                if (brokerageType === 'per_lot') {
-                    brokerage = trade.qty * brokeragePerLot;
+                if (type === 'PER_LOT' || type === 'PER LOT') {
+                    brokerage = trade.qty * rate;
+                } else if (type === 'PER_CRORE' || type === 'PER CRORE') {
+                    const turnover = (parseFloat(trade.entry_price) + parseFloat(trade.exit_price || 0)) * trade.qty;
+                    brokerage = (turnover / 10000000) * rate;
                 } else {
-                    // per crore basis
-                    const turnover = trade.qty * (parseFloat(trade.entry_price) + parseFloat(trade.exit_price || 0));
-                    brokerage = (turnover / 10000000) * brokeragePerLot;
+                    brokerage = trade.qty * rate;
+                }
+            } else {
+                // Fallback to legacy config
+                const brokerMcxBrokerage = config.brokerMcxBrokerage || config.mcxLotBrokerage || {};
+                if (brokerMcxBrokerage[trade.symbol] !== undefined) {
+                    brokerage = trade.qty * parseFloat(brokerMcxBrokerage[trade.symbol]);
+                } else {
+                    const brokeragePerLot = parseFloat(config.mcxBrokerage || 0);
+                    const brokerageType = config.mcxBrokerageType || 'per_crore';
+                    if (brokerageType === 'per_lot') {
+                        brokerage = trade.qty * brokeragePerLot;
+                    } else {
+                        const turnover = trade.qty * (parseFloat(trade.entry_price) + parseFloat(trade.exit_price || 0));
+                        brokerage = (turnover / 10000000) * brokeragePerLot;
+                    }
                 }
             }
 

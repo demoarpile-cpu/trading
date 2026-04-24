@@ -128,6 +128,8 @@ const login = async (req, res) => {
         username: user.username,
         role: user.role,
         fullName: user.full_name,
+        mobile: user.mobile,
+        city: user.city,
         parent_id: user.parent_id,
         parentRole: parentRole
       }
@@ -315,4 +317,37 @@ const verifyTransactionPassword = async (req, res) => {
     }
 };
 
-module.exports = { login, createUser, updateTransactionPassword, changePassword, verifyTransactionPassword };
+const getMe = async (req, res) => {
+  try {
+    const [rows] = await db.execute('SELECT id, username, role, full_name, email, mobile, city, parent_id, balance, credit_limit FROM users WHERE id = ?', [req.user.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
+    
+    const user = rows[0];
+    
+    // Fetch parent role if applicable
+    let parentRole = null;
+    if (user.parent_id) {
+      const [pRows] = await db.execute('SELECT role FROM users WHERE id = ?', [user.parent_id]);
+      if (pRows.length > 0) parentRole = pRows[0].role;
+    }
+
+    res.json({
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      fullName: user.full_name,
+      email: user.email,
+      mobile: user.mobile,
+      city: user.city,
+      parent_id: user.parent_id,
+      parentRole: parentRole,
+      balance: user.balance,
+      creditLimit: user.credit_limit
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server Error');
+  }
+};
+
+module.exports = { login, createUser, updateTransactionPassword, changePassword, verifyTransactionPassword, getMe };
