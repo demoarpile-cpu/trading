@@ -550,8 +550,12 @@ const getUserSegments = async (req, res) => {
     try {
         let [rows] = await db.execute('SELECT * FROM user_segments WHERE user_id = ?', [req.params.id]);
         
-        // Check if rows are all disabled and have 0 brokerage (typical for uninitialized or out-of-sync users)
-        const isDefault = rows.length > 0 && rows.every(r => r.is_enabled === 0 && parseFloat(r.brokerage_value) === 0);
+        // Check if rows are all disabled — brokerage value is irrelevant here.
+        // Previously this also checked brokerage_value === 0, which caused a bug:
+        // user_segments could have is_enabled=0 with non-zero brokerage (set up but not yet enabled),
+        // making isDefault=false and skipping the config_json fallback entirely, so the mobile
+        // app would always see DISABLED even after the broker enabled the segments in config_json.
+        const isDefault = rows.length > 0 && rows.every(r => r.is_enabled === 0);
         
         if (rows.length === 0 || isDefault) {
             console.log(`[getUserSegments] Fallback: user_segments is default/empty for user ${req.params.id}. Checking client_settings...`);

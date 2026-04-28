@@ -194,8 +194,8 @@ const placeOrder = async (req, res) => {
         // ─── PERMANENT SCRIP BAN CHECK ──────────────────────────────────────────
         const [scripBan] = await db.execute('SELECT id FROM banned_scrips WHERE symbol = ?', [symbol]);
         if (scripBan.length > 0) {
-            return res.status(400).json({ 
-                message: `Trading in ${symbol} is prohibited. Scrip is currently banned.` 
+            return res.status(400).json({
+                message: `Trading in ${symbol} is prohibited. Scrip is currently banned.`
             });
         }
 
@@ -507,7 +507,7 @@ const placeOrder = async (req, res) => {
         if (marketType === 'MCX') {
             const baseScrip = getMcxBaseScrip(symbol);
             const brokerMargins = clientConfig.brokerMcxMargins || {};
-            
+
             // Priority 1: Scrip-specific Lot-wise Margin (Fixed Amount)
             // Defaulting to INTRADAY as per simpler requirements
             const fixedMarginKey = `${baseScrip} INTRADAY`;
@@ -1121,7 +1121,7 @@ const getTradeById = async (req, res) => {
         // ENHANCED: Also allow Admin/Broker to see if it's their subordinate's trade
         const isTargetUser = trade.user_id === requesterId;
         const isCreator = trade.created_by === requesterId;
-        
+
         let isParent = false;
         if (!isTargetUser && !isCreator) {
             // Check if requester is parent or broker
@@ -1392,7 +1392,7 @@ const updateTrade = async (req, res) => {
             try {
                 const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
                 if (scripRows.length > 0) lotSize = parseFloat(scripRows[0].lot_size || 1);
-            } catch (e) {}
+            } catch (e) { }
 
             const price = entry_price ? parseFloat(entry_price) : parseFloat(trade.entry_price);
             const newMargin = price * newQty * lotSize * 0.1;
