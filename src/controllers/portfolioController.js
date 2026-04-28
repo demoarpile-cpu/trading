@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const MarginUtils = require('../utils/MarginUtils');
 
 const getLedger = async (req, res) => {
     try {
@@ -63,22 +64,30 @@ const getBalance = async (req, res) => {
         if (!userRows.length) return res.status(404).json({ message: 'User not found' });
         const balance = parseFloat(userRows[0].balance);
 
-        // 2. Total margin used from OPEN trades
-        const [marginRows] = await db.execute(
-            'SELECT IFNULL(SUM(margin_used), 0) as total_margin FROM trades WHERE user_id = ? AND status = "OPEN"',
+        // 2. Total margin used from OPEN trades (DYNAMIC)
+        const [openTrades] = await db.execute(
+            `SELECT t.*, s.lot_size 
+             FROM trades t 
+             LEFT JOIN scrip_data s ON t.symbol = s.symbol 
+             WHERE t.user_id = ? AND t.status = "OPEN"`,
             [userId]
         );
-        const totalMarginUsed = parseFloat(marginRows[0].total_margin);
 
-        // 3. Margin breakdown by market_type
-        const [segmentRows] = await db.execute(
-            `SELECT market_type, IFNULL(SUM(margin_used), 0) as segment_margin
-             FROM trades WHERE user_id = ? AND status = 'OPEN'
-             GROUP BY market_type`,
-            [userId]
-        );
+        const [clientSettings] = await db.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [userId]);
+        const clientConfig = clientSettings.length ? JSON.parse(clientSettings[0].config_json || '{}') : {};
+
+        // Calculate breakdown by segment manually or via a new helper
         const marginBySegment = { MCX: 0, EQUITY: 0, OPTIONS: 0, COMEX: 0, FOREX: 0, CRYPTO: 0 };
-        segmentRows.forEach(r => { marginBySegment[r.market_type] = parseFloat(r.segment_margin); });
+        let totalMarginUsed = 0;
+
+        openTrades.forEach(trade => {
+            const mType = (trade.market_type || 'MCX').toUpperCase();
+            const calc = MarginUtils.calculateTotalRequiredHoldingMargin([trade], clientConfig);
+            totalMarginUsed += calc;
+            if (marginBySegment[mType] !== undefined) {
+                marginBySegment[mType] += calc;
+            }
+        });
 
         // 4. Gross P/L from closed trades
         const [plRows] = await db.execute(

@@ -9,64 +9,50 @@ const MarginUtils = {
         for (const trade of trades) {
             const qtyNum = parseFloat(trade.qty || 0);
             const entryPrice = parseFloat(trade.entry_price || 0);
-            const turnover = entryPrice * qtyNum;
+            const lotSize = parseFloat(trade.lot_size || trade.multiplier || 1);
+            const turnover = entryPrice * qtyNum * lotSize;
             let tradeMargin = 0;
 
-            if (trade.market_type === 'MCX') {
+            const mType = (trade.market_type || '').toUpperCase();
+
+            if (mType === 'MCX') {
                 const brokerMargins = clientConfig.mcxLotMargins || {};
+                const upperSym = (trade.symbol || '').toUpperCase();
                 const baseScrip = this.getMcxBaseScrip(trade.symbol, brokerMargins);
                 
-                // Priority 1: Scrip-specific Lot-wise HOLDING Margin (Fixed Amount)
-                const holdingMarginValue = parseFloat(brokerMargins[baseScrip]?.HOLDING ?? 0);
-                const lotSize = parseFloat(brokerMargins[baseScrip]?.LOT ?? 1);
+                // Priority 1: Scrip-specific Lot-wise HOLDING Margin (Fixed Amount or Exposure)
+                const scripConfig = brokerMargins[upperSym] || brokerMargins[baseScrip];
+                const holdingMarginValue = parseFloat(scripConfig?.HOLDING || scripConfig?.holding_exposure || 0);
 
                 if (holdingMarginValue > 0) {
-                    tradeMargin = holdingMarginValue * (qtyNum / (lotSize || 1));
-                    console.log(`[MarginCalc] MCX Lot-wise: Scrip=${baseScrip}, Margin=${holdingMarginValue}, Qty=${qtyNum}, Result=${tradeMargin}`);
+                    // If it's a fixed amount per lot (usually > 1000) or exposure divisor (usually 100)
+                    if (holdingMarginValue > 500) {
+                        // Fixed Amount per lot
+                        tradeMargin = holdingMarginValue * qtyNum;
+                    } else {
+                        // Exposure Divisor
+                        tradeMargin = turnover / holdingMarginValue;
+                    }
                 } else {
                     // Priority 2: Global Exposure-based Calculation (HOLDING)
-                    const holdingExposure = parseInt(clientConfig.mcxHoldingMargin || 100);
-                    const exposureType = clientConfig.mcxExposureType || 'per_turnover';
-
-                    if (exposureType === 'per_turnover') {
-                        tradeMargin = turnover / (holdingExposure || 1);
-                    } else {
-                        tradeMargin = holdingExposure * qtyNum;
-                    }
-                    console.log(`[MarginCalc] MCX Exposure: Scrip=${baseScrip}, Exposure=${holdingExposure}, Type=${exposureType}, Result=${tradeMargin}`);
+                    const holdingExposure = parseFloat(clientConfig.mcxHoldingMargin || clientConfig.mcx_holding_exposure || 100);
+                    tradeMargin = turnover / (holdingExposure || 1);
                 }
-            } else if (trade.market_type === 'EQUITY') {
-                const holdingExposure = parseInt(clientConfig.equityHoldingMargin || 100);
+            } else if (mType === 'EQUITY') {
+                const holdingExposure = parseFloat(clientConfig.equityIntradayMargin || clientConfig.equityHoldingMargin || 500);
                 tradeMargin = turnover / (holdingExposure || 1);
-            } else if (trade.market_type === 'OPTIONS') {
-                const symbol = (trade.symbol || '').toUpperCase();
-                let holdingExposure = 2; // Default 2x
-
-                if (symbol.includes('NIFTY') || symbol.includes('BANKNIFTY')) {
-                    holdingExposure = parseInt(clientConfig.optionsIndexHolding || 2);
-                } else if (symbol.includes('MCX') || symbol.includes('GOLD') || symbol.includes('SILVER')) {
-                    holdingExposure = parseInt(clientConfig.optionsMcxHolding || 2);
-                } else {
-                    holdingExposure = parseInt(clientConfig.optionsEquityHolding || 2);
-                }
-                tradeMargin = turnover / (holdingExposure || 1);
-            } else if (trade.market_type === 'COMEX') {
-                const comexConfig = clientConfig.comexConfig || {};
-                const holdingExposure = parseInt(comexConfig.holdingMargin || 100);
-                tradeMargin = turnover / (holdingExposure || 1);
-            } else if (trade.market_type === 'FOREX') {
-                const forexConfig = clientConfig.forexConfig || {};
-                const holdingExposure = parseInt(forexConfig.holdingMargin || 100);
-                tradeMargin = turnover / (holdingExposure || 1);
-            } else if (trade.market_type === 'CRYPTO') {
-                const cryptoConfig = clientConfig.cryptoConfig || {};
-                const holdingExposure = parseInt(cryptoConfig.holdingMargin || 100);
+            } else if (mType === 'OPTIONS') {
+                // Options typically use a divisor of 1 or a small value
+                tradeMargin = turnover / 1; 
+            } else if (mType === 'COMEX' || mType === 'FOREX' || mType === 'CRYPTO') {
+                const segConfig = clientConfig[`${mType.toLowerCase()}Config`] || {};
+                const holdingExposure = parseFloat(segConfig.holdingMargin || segConfig.intradayMargin || 100);
                 tradeMargin = turnover / (holdingExposure || 1);
             }
 
-            // Fallback for any missed segments or 0 results (Ensure something is blocked)
+            // Fallback for any missed segments or 0 results
             if (tradeMargin <= 0 && turnover > 0) {
-                tradeMargin = turnover * 0.1; // 10% default for safety
+                tradeMargin = turnover / 100; // 1% fallback
             }
 
             totalMargin += tradeMargin;

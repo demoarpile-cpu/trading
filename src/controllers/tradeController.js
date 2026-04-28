@@ -497,10 +497,53 @@ const placeOrder = async (req, res) => {
         }
 
         // 7. Calculate Margin Required with Lot Size
+        const MCX_LOT_SIZES = {
+            'GOLD': 100, 'GOLDM': 10, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
+            'SILVER': 30, 'SILVERM': 5, 'SILVERMIC': 1,
+            'CRUDEOIL': 100, 'CRUDEOILM': 10,
+            'NATURALGAS': 1250, 'NATGASMINI': 250,
+            'COPPER': 2500,
+            'ZINC': 5000, 'ZINCMINI': 1000,
+            'LEAD': 5000, 'LEADMINI': 1000,
+            'NICKEL': 1500, 'NICKELMINI': 100,
+            'ALUMINIUM': 5000, 'ALUMINI': 1000,
+            'MENTHAOIL': 360, 'COTTON': 25, 'BULLDEX': 1,
+        };
+
         let lotSize = 1;
         try {
-            const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [symbol]);
-            if (scripRows.length > 0) lotSize = parseFloat(scripRows[0].lot_size || 1);
+            // 1. Priority: User Specific Dynamic Lot Size (from UI/Config)
+            if (clientConfig && clientConfig.mcxLotMargins) {
+                const base = getMcxBaseScrip(symbol) || symbol.toUpperCase();
+                const configLot = clientConfig.mcxLotMargins[base]?.LOT || clientConfig.mcxLotMargins[symbol.toUpperCase()]?.LOT;
+                if (configLot && parseFloat(configLot) > 0) {
+                    lotSize = parseFloat(configLot);
+                    console.log(`[placeOrder] 🎯 Using Dynamic Lot Size from Config: ${symbol} → ${lotSize}`);
+                } else {
+                    // 2. Fetch from DB if not in config
+                    const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [symbol]);
+                    if (scripRows.length > 0) {
+                        lotSize = parseFloat(scripRows[0].lot_size || 1);
+                    } else if (marketType === 'MCX') {
+                        // 3. Hardcoded Fallback
+                        const baseFallback = getMcxBaseScrip(symbol);
+                        if (baseFallback && MCX_LOT_SIZES[baseFallback]) {
+                            lotSize = MCX_LOT_SIZES[baseFallback];
+                        }
+                    }
+                }
+            } else {
+                // Classic flow if config missing
+                const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [symbol]);
+                if (scripRows.length > 0) {
+                    lotSize = parseFloat(scripRows[0].lot_size || 1);
+                } else if (marketType === 'MCX') {
+                    const base = getMcxBaseScrip(symbol);
+                    if (base && MCX_LOT_SIZES[base]) {
+                        lotSize = MCX_LOT_SIZES[base];
+                    }
+                }
+            }
         } catch (e) { console.error('Error fetching lotSize for margin:', e); }
 
         // MCX Intraday/Holding Exposure
@@ -1085,10 +1128,41 @@ const getTrades = async (req, res) => {
             params.push(req.query.toDate);
         }
 
-        query += ' ORDER BY t.entry_time DESC';
-        console.log('[getTrades] Query:', query);
-        console.log('[getTrades] Params:', params);
         const [rows] = await db.execute(query, params);
+
+        // --- ENHANCEMENT: Dynamic Margin for OPEN trades ---
+        // If we are listing OPEN trades, we should calculate the current "Holding Margin Required"
+        // to match the app's Portfolio display.
+        if (status === 'OPEN' || !status) {
+            // Group by user to fetch configs once
+            const userIds = [...new Set(rows.map(r => r.user_id))];
+            if (userIds.length > 0) {
+                const [configRows] = await db.query(
+                    'SELECT user_id, config_json FROM client_settings WHERE user_id IN (?)',
+                    [userIds]
+                );
+                const configMap = {};
+                configRows.forEach(c => { configMap[c.user_id] = JSON.parse(c.config_json || '{}'); });
+
+                // Fetch lot sizes
+                const [scripRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
+                const lotSizeMap = {};
+                scripRows.forEach(s => { lotSizeMap[s.symbol] = parseFloat(s.lot_size || 1); });
+
+                const MarginUtils = require('../utils/MarginUtils');
+                rows.forEach(trade => {
+                    if (trade.status === 'OPEN') {
+                        const config = configMap[trade.user_id] || {};
+                        const lotSize = lotSizeMap[trade.symbol] || 1;
+                        trade.margin_used = MarginUtils.calculateTotalRequiredHoldingMargin([{
+                            ...trade,
+                            lot_size: lotSize
+                        }], config);
+                    }
+                });
+            }
+        }
+
         console.log('[getTrades] Results:', rows.length, 'trades found for user:', req.user.id);
         res.json(rows);
     } catch (err) {
