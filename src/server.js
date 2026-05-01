@@ -117,11 +117,73 @@ const PORT = process.env.PORT || 5000;
 // Share io instance with controllers (before migrations)
 setIo(io);
 
+// Auto-sync Kite instruments into database
+async function syncKiteInstrumentsOnStartup() {
+    try {
+        const kiteService = require('./utils/kiteService');
+        const db = require('./config/db');
+
+        if (!kiteService.isAuthenticated()) {
+            return;
+        }
+        const instruments = await kiteService.getInstruments();
+
+        if (!Array.isArray(instruments) || instruments.length === 0) {
+            return;
+        }
+
+        const seen = new Set();
+        let syncCount = 0;
+
+        for (const i of instruments) {
+            if (i.exchange === 'NSE' && i.instrument_type === 'EQ') {
+                const symbol = i.tradingsymbol;
+                const key = `NSE:${symbol}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+
+                const lotSize = parseInt(i.lot_size) || 1;
+                try {
+                    await db.execute(
+                        `INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type)
+                         VALUES (?, ?, ?, ?)
+                         ON DUPLICATE KEY UPDATE lot_size = VALUES(lot_size), market_type = VALUES(market_type)`,
+                        [symbol, lotSize, 50, 'EQUITY']
+                    );
+                    syncCount++;
+                } catch (_) {}
+            } else if ((i.exchange === 'MCX' || i.exchange === 'NFO') && i.instrument_type === 'FUT') {
+                const symbol = i.name || i.tradingsymbol;
+                const key = `${i.exchange}:${symbol}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+
+                const lotSize = parseInt(i.lot_size) || 1;
+                const marketType = i.exchange === 'MCX' ? 'MCX' : 'NFO';
+                try {
+                    await db.execute(
+                        `INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type)
+                         VALUES (?, ?, ?, ?)
+                         ON DUPLICATE KEY UPDATE lot_size = VALUES(lot_size), market_type = VALUES(market_type)`,
+                        [symbol, lotSize, 50, marketType]
+                    );
+                    syncCount++;
+                } catch (_) {}
+            }
+        }
+
+    } catch (err) {
+    }
+}
+
 // Run DB migrations first, then start server
 runMigrations()
     .then(async () => {
         // Initialize Redis Cache (safe: fails gracefully if unavailable)
         await initializeCache();
+
+        // Sync Kite instruments (if authenticated)
+        await syncKiteInstrumentsOnStartup();
 
         server.listen(PORT, () => {
             console.log(`🚀 Server running on port ${PORT}`);
@@ -139,33 +201,28 @@ runMigrations()
         startRolloverMarginJob();
         rmsService.start(10000); // Check risk every 10 seconds
 
-        // Initialize Market Data (with fallback to mock engine)
+        // Initialize Market Data (Real Data Only - No Mock Fallback)
         try {
             const db = require('./config/db');
             const [users] = await db.execute('SELECT id FROM user_kite_sessions LIMIT 1');
             if (users.length > 0) {
                 try {
                     await marketDataService.init(users[0].id);
-                    console.log('✅ MarketDataService initialized with real Kite connection');
                 } catch (tickerErr) {
-                    console.warn('⚠️  Kite ticker failed, falling back to mock engine:', tickerErr.message);
-                    marketDataService.startMockEngine();
+                    console.log('❌ Market data initialization failed. Only real API data will be shown.');
                 }
             } else {
-                console.log('ℹ️  No Kite sessions found, starting mock engine');
-                marketDataService.startMockEngine();
+                console.log('⚠️  No Kite sessions found. Waiting for real market data from API.');
             }
         } catch (err) {
-            console.warn('Market data init failed:', err.message);
-            marketDataService.startMockEngine();
+            console.log('⚠️  Market initialization error. Only real data will be shown:', err.message);
         }
 
         // Start Crypto + Forex feeds (Twelve Data) — independent of Kite
         try {
             marketDataService.startCryptoForex();
-            console.log('✅ Crypto + Forex feeds started');
         } catch (cfErr) {
-            console.warn('Crypto/Forex feeds failed:', cfErr.message);
+            console.log('Crypto/Forex feeds unavailable');
         }
     })
     .catch((err) => {

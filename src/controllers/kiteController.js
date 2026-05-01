@@ -1,6 +1,23 @@
 const kiteAuthService = require('../services/KiteAuthService');
 const kiteService = require('../utils/kiteService');
 
+const MCX_LOT_SIZES = {
+    'GOLD': 100, 'GOLDM': 10, 'GOLDPETAL': 1, 'GOLDGUINEA': 8,
+    'SILVER': 30, 'SILVERM': 5, 'SILVERMIC': 1,
+    'CRUDEOIL': 100, 'CRUDEOILM': 10,
+    'NATURALGAS': 1250, 'NATGASMINI': 250,
+    'COPPER': 2500, 'COPPERM': 500,
+    'ZINC': 5000, 'ZINCMINI': 1000,
+    'LEAD': 5000, 'LEADMINI': 1000,
+    'NICKEL': 1500, 'NICKELMINI': 100,
+    'ALUMINIUM': 5000, 'ALUMINI': 1000,
+    'MENTHAOIL': 360, 'COTTON': 25, 'COTTONCNDY': 20, 'BULLDEX': 1
+};
+
+const NFO_LOT_SIZES = {
+    'NIFTY': 50, 'BANKNIFTY': 50, 'FINNIFTY': 50, 'MIDCPNIFTY': 50, 'SENSEX': 10
+};
+
 /**
  * Controller to handle Kite authentication requests.
  */
@@ -43,20 +60,67 @@ class KiteController {
             const session = await kiteService.handleCallback(request_token);
             const accessToken = session.access_token || '';
 
-            console.log('=========================================');
-            console.log('KITE ACCESS TOKEN:', accessToken);
-            console.log('USER:', session.user_name || session.user_id || 'N/A');
-            console.log('=========================================');
-
             // Also save to per-user DB if userId was passed via state param
             if (userId) {
                 try {
                     await kiteAuthService.handleCallback(userId, request_token);
                 } catch (dbErr) {
                     // Per-user save may fail if request_token already used, that's OK — global is set
-                    console.warn('Per-user DB save skipped:', dbErr.message);
                 }
             }
+
+            // Trigger instruments sync in background (don't block response)
+            setImmediate(async () => {
+                try {
+                    const db = require('../config/db');
+                    const instruments = await kiteService.getInstruments();
+
+                    if (!Array.isArray(instruments) || instruments.length === 0) {
+                        return;
+                    }
+                    const seen = new Set();
+                    let syncCount = 0;
+
+                    for (const i of instruments) {
+                        if (i.exchange === 'NSE' && i.instrument_type === 'EQ') {
+                            const symbol = i.tradingsymbol;
+                            const key = `NSE:${symbol}`;
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+
+                            const lotSize = parseInt(i.lot_size) || 1;
+                            try {
+                                await db.execute(
+                                    `INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type)
+                                     VALUES (?, ?, ?, ?)
+                                     ON DUPLICATE KEY UPDATE lot_size = VALUES(lot_size), market_type = VALUES(market_type)`,
+                                    [symbol, lotSize, 50, 'EQUITY']
+                                );
+                                syncCount++;
+                            } catch (_) {}
+                        } else if ((i.exchange === 'MCX' || i.exchange === 'NFO') && i.instrument_type === 'FUT') {
+                            const symbol = i.name || i.tradingsymbol;
+                            const key = `${i.exchange}:${symbol}`;
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+
+                            const lotSize = parseInt(i.lot_size) || 1;
+                            const marketType = i.exchange === 'MCX' ? 'MCX' : 'NFO';
+                            try {
+                                await db.execute(
+                                    `INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type)
+                                     VALUES (?, ?, ?, ?)
+                                     ON DUPLICATE KEY UPDATE lot_size = VALUES(lot_size), market_type = VALUES(market_type)`,
+                                    [symbol, lotSize, 50, marketType]
+                                );
+                                syncCount++;
+                            } catch (_) {}
+                        }
+                    }
+
+                } catch (syncErr) {
+                }
+            });
 
             // Detect redirect: use request origin or fallback to localhost for local dev
             const redirectURL = `${FRONTEND_URL}/kite-dashboard`;
@@ -160,7 +224,59 @@ class KiteController {
 
             // Token is valid — save to per-user DB (skip re-validation)
             await kiteAuthService.saveTokenToDB(userId, access_token, profile);
-            console.log('🔗 Kite token validated & synced. User:', profile?.user_name || 'N/A');
+
+            // Trigger instruments sync in background (don't block response)
+            setImmediate(async () => {
+                try {
+                    const db = require('../config/db');
+                    const instruments = await kiteService.getInstruments();
+
+                    if (!Array.isArray(instruments) || instruments.length === 0) {
+                        return;
+                    }
+                    const seen = new Set();
+                    let syncCount = 0;
+
+                    for (const i of instruments) {
+                        if (i.exchange === 'NSE' && i.instrument_type === 'EQ') {
+                            const symbol = i.tradingsymbol;
+                            const key = `NSE:${symbol}`;
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+
+                            const lotSize = parseInt(i.lot_size) || 1;
+                            try {
+                                await db.execute(
+                                    `INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type)
+                                     VALUES (?, ?, ?, ?)
+                                     ON DUPLICATE KEY UPDATE lot_size = VALUES(lot_size), market_type = VALUES(market_type)`,
+                                    [symbol, lotSize, 50, 'EQUITY']
+                                );
+                                syncCount++;
+                            } catch (_) {}
+                        } else if ((i.exchange === 'MCX' || i.exchange === 'NFO') && i.instrument_type === 'FUT') {
+                            const symbol = i.name || i.tradingsymbol;
+                            const key = `${i.exchange}:${symbol}`;
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+
+                            const lotSize = parseInt(i.lot_size) || 1;
+                            const marketType = i.exchange === 'MCX' ? 'MCX' : 'NFO';
+                            try {
+                                await db.execute(
+                                    `INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type)
+                                     VALUES (?, ?, ?, ?)
+                                     ON DUPLICATE KEY UPDATE lot_size = VALUES(lot_size), market_type = VALUES(market_type)`,
+                                    [symbol, lotSize, 50, marketType]
+                                );
+                                syncCount++;
+                            } catch (_) {}
+                        }
+                    }
+
+                } catch (syncErr) {
+                }
+            });
 
             res.json({ success: true, message: 'Access token set successfully', user: profile?.user_name || null });
         } catch (err) {

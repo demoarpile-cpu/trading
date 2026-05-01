@@ -12,7 +12,7 @@ class TradeService {
      * Closes a single trade by its ID.
      * Reusable for manual close, auto-close, and expiry square-off.
      */
-    async closeTrade(tradeId, exitPrice = null, requesterId = 0) {
+    async closeTrade(tradeId, exitPrice = null, requesterId = 0, providedPnl = null) {
         const connection = await db.getConnection();
         try {
             await connection.beginTransaction();
@@ -49,14 +49,54 @@ class TradeService {
             }
 
             // 3. Normal Market Order Closure
-            // Get lot_size from scrip_data for accurate P/L
-            const [scripRows] = await connection.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
-            const lotSize = (scripRows.length > 0) ? parseFloat(scripRows[0].lot_size || 1) : 1;
+            // Use multiplier from INSTRUMENT_META (hardcoded values for MCX/NSE)
+            let lotSize = 1;
+            const mType = (trade.market_type || '').toUpperCase();
 
-            const finalExitPrice = exitPrice || mockEngine.getPrice(trade.symbol) || trade.entry_price;
-            const pnl = trade.type === 'BUY'
-                ? (finalExitPrice - trade.entry_price) * trade.qty * lotSize
-                : (trade.entry_price - finalExitPrice) * trade.qty * lotSize;
+            // INSTRUMENT_META multipliers (from TradeContext.js)
+            const INSTRUMENT_META = {
+                'CRUDEOIL': 100, 'NATURALGAS': 1250, 'GOLD': 100, 'GOLDM': 10,
+                'SILVER': 30, 'SILVERM': 5, 'COPPER': 2500, 'ZINC': 5000,
+                'NICKEL': 1500, 'LEAD': 5000, 'ALUMINIUM': 5000, 'MENTHAOIL': 360,
+                'COTTON': 25, 'BULLDEX': 1, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
+                'ZINCMINI': 1000, 'LEADMINI': 1000, 'NICKELMINI': 100, 'ALUMINI': 1000,
+                'CRUDEOILM': 10, 'NATGASMINI': 250, 'SILVERMIC': 1,
+                'TCS': 1, 'RELIANCE': 1, 'SBIN': 1, 'INFY': 1
+            };
+
+            if (mType === 'MCX' || mType === 'EQUITY') {
+                const baseSymbol = Object.keys(INSTRUMENT_META).find(key => trade.symbol.toUpperCase().includes(key));
+                if (baseSymbol && INSTRUMENT_META[baseSymbol]) {
+                    lotSize = INSTRUMENT_META[baseSymbol];
+                } else {
+                    lotSize = 1;
+                }
+            } else {
+                const [scripRows] = await connection.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
+                if (scripRows.length > 0 && parseFloat(scripRows[0].lot_size) > 1) {
+                    lotSize = parseFloat(scripRows[0].lot_size);
+                }
+            }
+
+            let finalExitPrice = exitPrice || trade.entry_price;
+            if (!finalExitPrice || finalExitPrice <= 0) {
+                const { getMcxBaseScrip } = require('../utils/symbolHelper');
+                const cleanSymbol = getMcxBaseScrip(trade.symbol);
+                finalExitPrice = mockEngine.getPrice(cleanSymbol) || trade.entry_price;
+            }
+
+            // Use provided P/L from frontend if available (calculated at the moment of exit)
+            // Otherwise calculate it based on exit price and lot size
+            let pnl;
+            if (providedPnl !== null && providedPnl !== undefined) {
+                pnl = parseFloat(providedPnl);
+                console.log(`[TradeService] Using provided P/L: ${pnl}`);
+            } else {
+                pnl = trade.type === 'BUY'
+                    ? (finalExitPrice - trade.entry_price) * trade.qty * lotSize
+                    : (trade.entry_price - finalExitPrice) * trade.qty * lotSize;
+                console.log(`[TradeService] Calculated P/L: ${pnl}`);
+            }
 
             // 4. Calculate Brokerage & Swap
             let brokerage = 0;
@@ -65,44 +105,56 @@ class TradeService {
 
             // Helper: calculate brokerage based on type
             const calcBrokerage = (brokerageVal, brokerageType, qty, exitPrice, entryPrice) => {
-                const rate = parseFloat(brokerageVal || 0);
+                const rate = Math.abs(parseFloat(brokerageVal || 0));
                 if (rate <= 0) return 0;
-                
+
                 const type = (brokerageType || 'PER_LOT').toUpperCase();
+                let result = 0;
+
                 if (type === 'PER_LOT' || type === 'PER LOT') {
-                    return qty * rate;
+                    result = qty * rate;
                 } else if (type === 'PER_CRORE' || type === 'PER CRORE') {
                     const turnover = (parseFloat(entryPrice) + parseFloat(exitPrice)) * qty;
-                    return (turnover / 10000000) * rate;
+                    result = (turnover / 10000000) * rate;
                 } else {
-                    return qty * rate;
+                    result = qty * rate;
                 }
+
+                // Ensure brokerage is never negative
+                return Math.max(0, result);
             };
 
             // Clean symbol (remove exchange prefix like "MCX:" and handle formats like GOLD26JUNFUT)
             let rawSymbol = (trade.symbol || '').toUpperCase();
             let cleanSymbol = rawSymbol.includes(':') ? rawSymbol.split(':')[1] : rawSymbol;
-            const mType = (trade.market_type || '').toUpperCase();
 
             // Try to find scrip-specific brokerage in client_settings config
             let scripRate = undefined;
 
             if (mType === 'MCX') {
-                const lotBrokerageMap = { ...clientConfig.mcxLotBrokerage, ...clientConfig.brokerMcxBrokerage };
-                // 1. Try exact match on clean symbol
-                if (lotBrokerageMap[cleanSymbol] !== undefined) {
-                    scripRate = parseFloat(lotBrokerageMap[cleanSymbol]);
-                } else {
-                    // 2. Try to find if any key in map is a prefix or part of cleanSymbol
-                    // Sort keys by length descending to match longest first (e.g., NATURALGAS MINI before NATURALGAS)
-                    const sortedKeys = Object.keys(lotBrokerageMap).sort((a, b) => b.length - a.length);
-                    for (const key of sortedKeys) {
-                        if (cleanSymbol.startsWith(key.toUpperCase().replace(/\s+/g, ''))) {
-                            scripRate = parseFloat(lotBrokerageMap[key]);
-                            break;
+                // Priority based on mcxBrokerageType
+                const brokerageType = (clientConfig.mcxBrokerageType || 'per_crore').toLowerCase();
+
+                // ONLY look for scrip-specific brokerage if in per_lot mode
+                if (brokerageType === 'per_lot') {
+                    const lotBrokerageMap = { ...clientConfig.brokerMcxBrokerage, ...clientConfig.mcxLotBrokerage };
+
+                    // 1. Try exact match on clean symbol
+                    if (lotBrokerageMap[cleanSymbol] !== undefined) {
+                        scripRate = parseFloat(lotBrokerageMap[cleanSymbol]);
+                    } else {
+                        // 2. Try to find if any key in map is a prefix or part of cleanSymbol
+                        // Sort keys by length descending to match longest first (e.g., NATURALGAS MINI before NATURALGAS)
+                        const sortedKeys = Object.keys(lotBrokerageMap).sort((a, b) => b.length - a.length);
+                        for (const key of sortedKeys) {
+                            if (cleanSymbol.startsWith(key.toUpperCase().replace(/\s+/g, ''))) {
+                                scripRate = parseFloat(lotBrokerageMap[key]);
+                                break;
+                            }
                         }
                     }
                 }
+                // If per_crore mode, skip scrip-specific lookup and use general rate in fallback
             } else if (mType === 'EQUITY') {
                 const equityMap = clientConfig.brokerEquityBrokerage || {};
                 if (equityMap[cleanSymbol] !== undefined) {
@@ -136,8 +188,11 @@ class TradeService {
                 } else {
                     // Priority 3: General Fallback from client_settings
                     if (mType === 'MCX') {
-                        const rate = parseFloat(clientConfig.brokerMcxBrokerage || clientConfig.mcxBrokerage || 0);
-                        brokerage = calcBrokerage(rate, clientConfig.mcxBrokerageType || 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price);
+                        const brokerageType = (clientConfig.mcxBrokerageType || 'per_crore').toLowerCase();
+                        let rate = parseFloat(clientConfig.mcxBrokerage || 0);
+
+                        const calcType = brokerageType === 'per_lot' ? 'PER_LOT' : 'PER_CRORE';
+                        brokerage = calcBrokerage(rate, calcType, trade.qty, finalExitPrice, trade.entry_price);
                     } else if (mType === 'EQUITY') {
                         const rate = parseFloat(clientConfig.brokerEquityBrokerage || clientConfig.equityBrokerage || 0);
                         brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price);
@@ -181,7 +236,7 @@ class TradeService {
             }
 
             // 5. Update Database
-            const balanceChange = pnl + marginToRelease - brokerage - swap;
+            const balanceChange = pnl - brokerage - swap;
 
             await connection.execute(
                 'UPDATE trades SET status = "CLOSED", exit_price = ?, exit_time = NOW(), pnl = ?, brokerage = ?, swap = ? WHERE id = ?',

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getActionLedger, globalBatchUpdate, getSegmentValues, resetSegmentValues } = require('../controllers/systemController');
-const { getAllScrips, updateScrip, getTickers, createTicker, updateTicker, deleteTicker } = require('../controllers/scripController');
+const { getAllScrips, syncKiteInstruments, updateScrip, getTickers, createTicker, updateTicker, deleteTicker } = require('../controllers/scripController');
 const { getBannedOrders, createBannedOrder, deleteBannedOrder, deleteMultipleBannedOrders, getBannedScrips, toggleBannedScrip, bulkToggleBannedScrips } = require('../controllers/bannedController');
 const { getExpiryRules, updateExpiryRules } = require('../controllers/expiryController');
 const { authMiddleware, roleMiddleware } = require('../middleware/auth');
@@ -17,6 +17,7 @@ router.post('/reset-segment', authMiddleware, roleMiddleware(['SUPERADMIN']), re
 
 // Scrip & Ticker Management
 router.get('/scrips', authMiddleware, getAllScrips);
+router.post('/scrips/sync', authMiddleware, roleMiddleware(['SUPERADMIN', 'ADMIN']), syncKiteInstruments);
 router.put('/scrips', authMiddleware, roleMiddleware(['SUPERADMIN']), updateScrip);
 router.get('/tickers', authMiddleware, getTickers);
 router.post('/tickers', authMiddleware, roleMiddleware(['SUPERADMIN', 'ADMIN']), createTicker);

@@ -548,30 +548,10 @@ const placeOrder = async (req, res) => {
 
         // MCX Intraday/Holding Exposure
         if (marketType === 'MCX') {
-            const baseScrip = getMcxBaseScrip(symbol);
-            const brokerMargins = clientConfig.brokerMcxMargins || {};
-
-            // Priority 1: Scrip-specific Lot-wise Margin (Fixed Amount)
-            // Defaulting to INTRADAY as per simpler requirements
-            const fixedMarginKey = `${baseScrip} INTRADAY`;
-            const fixedMarginValue = parseFloat(brokerMargins[fixedMarginKey] || 0);
-
-            if (fixedMarginValue > 1) {
-                marginRequired = fixedMarginValue * qtyNum;
-                console.log(`[placeOrder] ✅ MCX Fixed Margin: Scrip=${baseScrip}, PerLot=${fixedMarginValue}, Qty=${qtyNum}, Total=${marginRequired}`);
-            } else {
-                // Priority 2: Global Exposure-based Calculation
-                const exposureValue = parseInt(clientConfig.mcxIntradayMargin || 500);
-                const turnover = executionPrice * qtyNum * lotSize; // Added lotSize
-                const exposureType = clientConfig.exposureMcxType || 'Per Turnover Basis';
-
-                if (exposureType === 'Per Turnover Basis') {
-                    marginRequired = turnover / exposureValue;
-                } else {
-                    marginRequired = exposureValue * qtyNum;
-                }
-                console.log(`[placeOrder] ✅ MCX Exposure: Turnover=${turnover}, Value=${exposureValue}, Type=${exposureType}, MarginRequired=${marginRequired.toFixed(2)}`);
-            }
+            const turnover = executionPrice * qtyNum * lotSize;
+            const exposureValue = parseInt(clientConfig.mcxIntradayMargin || 500);
+            marginRequired = turnover / exposureValue;
+            console.log(`[placeOrder] ✅ MCX Margin: Turnover=${turnover}, Exposure=${exposureValue}, Margin=${marginRequired.toFixed(2)}`);
         }
 
         // EQUITY Intraday/Holding Exposure
@@ -1010,11 +990,10 @@ const placeOrder = async (req, res) => {
             ]
         );
 
-        // 8. Deduct Margin from Balance
-        await db.execute(
-            'UPDATE users SET balance = balance - ? WHERE id = ?',
-            [marginRequired, targetUserId]
-        );
+        // 8. Check Balance but Don't Deduct
+        // (Ledger remains unchanged - margin calculation only for reference)
+        console.log(`[placeOrder] ℹ️ Margin Calculated (NOT deducted): ${marginRequired.toFixed(2)}`);
+        console.log(`[placeOrder] ℹ️ Ledger Balance: ${targetUser.balance} (unchanged)`);
 
         console.log('✅ Trade Inserted:', result.insertId);
         res.status(201).json({
@@ -1307,7 +1286,7 @@ const tradeService = require('../services/TradeService');
  */
 const closeTrade = async (req, res) => {
     try {
-        const { exitPrice } = req.body;
+        const { exitPrice, pnl } = req.body;
         const requesterId = req.user.id;
 
         // 1. Initial Fetch to check feasibility
@@ -1341,11 +1320,11 @@ const closeTrade = async (req, res) => {
         const lotSize = (scripRows.length > 0) ? parseFloat(scripRows[0].lot_size || 1) : 1;
 
         const currentPrice = exitPrice || mockEngine.getPrice(trade.symbol) || trade.entry_price;
-        const pnl = trade.type === 'BUY'
+        const validationPnl = trade.type === 'BUY'
             ? (currentPrice - trade.entry_price) * trade.qty * lotSize
             : (trade.entry_price - currentPrice) * trade.qty * lotSize;
 
-        if (pnl > 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
+        if (validationPnl > 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
             return res.status(400).json({
                 message: `Minimum profit booking time is ${minTimeSeconds} seconds. Please wait ${minTimeSeconds - secondsHeld} more second(s).`,
                 remainingSeconds: minTimeSeconds - secondsHeld
@@ -1362,7 +1341,7 @@ const closeTrade = async (req, res) => {
 
         // If Scalping SL is DISABLED → loss booking bhi min time ke baad hi hogi
         // If Scalping SL is ENABLED → loss booking kisi bhi time kar sakte
-        if (!scalpingStopLossEnabled && pnl < 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
+        if (!scalpingStopLossEnabled && validationPnl < 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
             return res.status(400).json({
                 message: `Cannot close in loss before minimum time (${minTimeSeconds}s). Please wait ${minTimeSeconds - secondsHeld} more second(s).`,
                 remainingSeconds: minTimeSeconds - secondsHeld
@@ -1370,7 +1349,7 @@ const closeTrade = async (req, res) => {
         }
 
         // ─── EXECUTE CLOSURE VIA SERVICE ──────────────────────────────────
-        const result = await tradeService.closeTrade(trade.id, exitPrice, requesterId);
+        const result = await tradeService.closeTrade(trade.id, exitPrice, requesterId, pnl);
 
         res.json({
             message: 'Trade closed successfully',
@@ -1465,7 +1444,25 @@ const updateTrade = async (req, res) => {
             let lotSize = 1;
             try {
                 const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
-                if (scripRows.length > 0) lotSize = parseFloat(scripRows[0].lot_size || 1);
+                if (scripRows.length > 0 && parseFloat(scripRows[0].lot_size) > 1) {
+                    lotSize = parseFloat(scripRows[0].lot_size);
+                } else if ((trade.market_type || '').toUpperCase() === 'MCX') {
+                    const MarginUtils = require('../utils/MarginUtils');
+                    const baseScrip = MarginUtils.getMcxBaseScrip(trade.symbol);
+                    const MCX_LOT_SIZES = {
+                        'GOLD': 100, 'GOLDM': 10, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
+                        'SILVER': 30, 'SILVERM': 5, 'SILVERMIC': 1,
+                        'CRUDEOIL': 100, 'CRUDEOILM': 10,
+                        'NATURALGAS': 1250, 'NATGASMINI': 250,
+                        'COPPER': 2500,
+                        'ZINC': 5000, 'ZINCMINI': 1000,
+                        'LEAD': 5000, 'LEADMINI': 1000,
+                        'NICKEL': 1500, 'NICKELMINI': 100,
+                        'ALUMINIUM': 5000, 'ALUMINI': 1000,
+                        'MENTHAOIL': 360, 'COTTON': 25, 'BULLDEX': 1,
+                    };
+                    if (baseScrip && MCX_LOT_SIZES[baseScrip]) lotSize = MCX_LOT_SIZES[baseScrip];
+                }
             } catch (e) { }
 
             const price = entry_price ? parseFloat(entry_price) : parseFloat(trade.entry_price);

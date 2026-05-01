@@ -26,7 +26,7 @@ const getClientLiveM2M = async (req, res) => {
 
         // 1. Fetch all relevant trades (Non-Deleted)
         let tradeQuery = `
-            SELECT t.*, u.username, u.full_name, u.role as user_role, cs.config_json as user_config
+            SELECT t.*, u.username, u.full_name, u.role as user_role, u.balance, cs.config_json as user_config
             FROM trades t
             JOIN users u ON t.user_id = u.id
             LEFT JOIN client_settings cs ON u.id = cs.user_id
@@ -74,11 +74,9 @@ const getClientLiveM2M = async (req, res) => {
                 const mcxLotMargins = userConfig.mcxLotMargins;
                 if (mcxLotMargins) {
                     const base = getMcxBaseScrip(symbol);
-                    const sym = symbol.toUpperCase().replace(/\d+.*/, ''); // Trim expiry like GOLD26MAY -> GOLD
-                    
-                    // Try exact match, base match, or trimmed match
-                    const configLot = mcxLotMargins[symbol] || mcxLotMargins[base] || mcxLotMargins[sym];
-                    
+                    const symTrimmed = symbol.toUpperCase().replace(/\d+.*/, '');
+
+                    const configLot = mcxLotMargins[symbol] || mcxLotMargins[base] || mcxLotMargins[symTrimmed];
                     if (configLot && typeof configLot === 'object' && configLot.LOT) {
                         const lot = parseFloat(configLot.LOT);
                         if (lot > 0) return lot;
@@ -86,20 +84,17 @@ const getClientLiveM2M = async (req, res) => {
                 }
             }
 
-            // 2. Try Scrip Data Table
-            if (lotMap[sym]) return lotMap[sym];
-            
-            // 3. Try Hardcoded Fallback
+            // 2. Try Scrip Data Table (PRIMARY - has all instruments from Kite API)
+            if (lotMap[sym] && lotMap[sym] > 0) return lotMap[sym];
+
             const base = getMcxBaseScrip(symbol);
+            if (base && lotMap[base.toUpperCase()] && lotMap[base.toUpperCase()] > 0) return lotMap[base.toUpperCase()];
+
+            // 3. Try Hardcoded MCX_LOT_SIZES
             if (base && MCX_LOT_SIZES[base]) return MCX_LOT_SIZES[base];
-            if (base && lotMap[base.toUpperCase()]) return lotMap[base.toUpperCase()];
-            
-            const parts = sym.split(':');
-            const pureSym = parts[parts.length - 1];
-            if (lotMap[pureSym]) return lotMap[pureSym];
-            if (MCX_LOT_SIZES[pureSym]) return MCX_LOT_SIZES[pureSym];
-            
-            return 1;
+            if (MCX_LOT_SIZES[sym]) return MCX_LOT_SIZES[sym];
+
+            return 1; // Default fallback
         };
 
         // 3. Map for MarketDataService prefixes
@@ -141,80 +136,114 @@ const getClientLiveM2M = async (req, res) => {
         trades.forEach(trade => {
             const mType = (trade.market_type || 'MCX').toUpperCase();
             let segment = mType === 'EQUITY' ? 'nse' : mType.toLowerCase();
-                
-                if (mType === 'NFO' || mType === 'OPTIONS') {
-                    const sym = trade.symbol.toUpperCase();
-                    if (sym.endsWith('CE') || sym.endsWith('PE') || /\d{5,}/.test(sym)) {
-                        segment = 'options';
-                    } else {
-                        segment = 'nse';
+
+            if (mType === 'NFO' || mType === 'OPTIONS') {
+                const sym = trade.symbol.toUpperCase();
+                if (sym.endsWith('CE') || sym.endsWith('PE') || /\d{5,}/.test(sym)) {
+                    segment = 'options';
+                } else {
+                    segment = 'nse';
+                }
+            }
+
+            const isBuy = trade.type === 'BUY';
+            const qty = Math.abs(trade.qty);
+            const entryPrice = parseFloat(trade.entry_price || 0);
+
+            // Parse user config if available
+            let userConfig = null;
+            if (trade.user_config) {
+                try {
+                    userConfig = typeof trade.user_config === 'string' ? JSON.parse(trade.user_config) : trade.user_config;
+                } catch (e) {
+                    console.error('Failed to parse user config for P/L calculation:', e);
+                }
+            }
+
+            const lotSize = getMultiplier(trade.symbol, userConfig);
+            const tradeValue = entryPrice * qty * lotSize;
+
+            if (isBuy) stats.buyTurnover[segment] += tradeValue;
+            else stats.sellTurnover[segment] += tradeValue;
+            stats.totalTurnover[segment] += tradeValue;
+
+            stats.brokerage[segment] += parseFloat(trade.brokerage || 0);
+
+            if (trade.status === 'CLOSED') {
+                stats.profitLoss[segment] += parseFloat(trade.pnl || 0);
+            }
+
+            if (trade.status === 'OPEN') {
+                stats.activeUsers[segment].add(trade.user_id);
+                if (isBuy) stats.activeBuy[segment] += 1;
+                else stats.activeSell[segment] += 1;
+
+                const prefix = PREFIX_MAP[mType] || mType;
+                let priceKey = trade.symbol.includes(':') ? trade.symbol : `${prefix}:${trade.symbol}`;
+
+                const liveData = marketDataService.getPrice(priceKey);
+
+                // Use BID for BUY trades (exit by selling) and ASK for SELL trades (exit by buying)
+                const exitPrice = isBuy
+                    ? (liveData?.bid || liveData?.ltp || entryPrice)
+                    : (liveData?.ask || liveData?.ltp || entryPrice);
+
+                const unrealizedPnl = isBuy
+                    ? (exitPrice - entryPrice) * qty * lotSize
+                    : (entryPrice - exitPrice) * qty * lotSize;
+
+                stats.profitLoss[segment] += unrealizedPnl;
+
+                if (!clientMap[trade.user_id]) {
+                    clientMap[trade.user_id] = {
+                        id: trade.user_id, username: trade.username,
+                        activePL: 0, activeTrades: 0, margin: 0, balance: parseFloat(trade.balance || 0)
+                    };
+                }
+                clientMap[trade.user_id].activePL += unrealizedPnl;
+                clientMap[trade.user_id].activeTrades += 1;
+
+                // --- Dynamic Margin Calculation (matching Mobile App Portfolio) ---
+                // Simple formula: Margin = HOLDING value × Quantity
+                // Just like in app: dynamicHoldingMarginPerLot * qty
+
+                const base = getMcxBaseScrip(trade.symbol);
+                // Default: 1000000 for MCX/NFO, 50 for NSE Equity
+                const defaultHolding = (trade.market_type === 'EQUITY') ? 50 : 1000000;
+                let holdingExposure = parseFloat(userConfig?.mcxHoldingMargin || defaultHolding);
+
+                // Try multiple key formats to find per-instrument HOLDING margin from form
+                if (userConfig?.mcxLotMargins) {
+                    // Try 1: exact base symbol (e.g., "GOLD")
+                    if (userConfig.mcxLotMargins[base]?.HOLDING) {
+                        holdingExposure = parseFloat(userConfig.mcxLotMargins[base].HOLDING);
+                    }
+                    // Try 2: with exchange prefix (e.g., "MCX:GOLD")
+                    else if (userConfig.mcxLotMargins[`MCX:${base}`]?.HOLDING) {
+                        holdingExposure = parseFloat(userConfig.mcxLotMargins[`MCX:${base}`].HOLDING);
+                    }
+                    // Try 3: full trade symbol (e.g., "GOLDJANFUT")
+                    else if (userConfig.mcxLotMargins[trade.symbol]?.HOLDING) {
+                        holdingExposure = parseFloat(userConfig.mcxLotMargins[trade.symbol].HOLDING);
+                    }
+                    // Try 4: symbol with exchange (e.g., "MCX:GOLDJANFUT")
+                    else if (userConfig.mcxLotMargins[`MCX:${trade.symbol}`]?.HOLDING) {
+                        holdingExposure = parseFloat(userConfig.mcxLotMargins[`MCX:${trade.symbol}`].HOLDING);
+                    }
+                    // Try 5: fuzzy match - find any key that STARTS with base symbol
+                    else {
+                        const matchingKey = Object.keys(userConfig.mcxLotMargins).find(
+                            key => key.toUpperCase().startsWith(base.toUpperCase()) && userConfig.mcxLotMargins[key]?.HOLDING
+                        );
+                        if (matchingKey) {
+                            holdingExposure = parseFloat(userConfig.mcxLotMargins[matchingKey].HOLDING);
+                        }
                     }
                 }
 
-                const isBuy = trade.type === 'BUY';
-                const qty = Math.abs(trade.qty);
-                const entryPrice = parseFloat(trade.entry_price || 0);
-
-                // Parse user config if available
-                let userConfig = null;
-                if (trade.user_config) {
-                    try {
-                        userConfig = typeof trade.user_config === 'string' ? JSON.parse(trade.user_config) : trade.user_config;
-                    } catch (e) {
-                        console.error('Failed to parse user config for P/L calculation:', e);
-                    }
-                }
-
-                const lotSize = getMultiplier(trade.symbol, userConfig);
-                const tradeValue = entryPrice * qty * lotSize;
-
-                if (isBuy) stats.buyTurnover[segment] += tradeValue;
-                else stats.sellTurnover[segment] += tradeValue;
-                stats.totalTurnover[segment] += tradeValue;
-
-                stats.brokerage[segment] += parseFloat(trade.brokerage || 0);
-
-                if (trade.status === 'CLOSED') {
-                    stats.profitLoss[segment] += parseFloat(trade.pnl || 0);
-                }
-
-                if (trade.status === 'OPEN') {
-                    stats.activeUsers[segment].add(trade.user_id);
-                    if (isBuy) stats.activeBuy[segment] += 1;
-                    else stats.activeSell[segment] += 1;
-
-                    const prefix = PREFIX_MAP[mType] || mType;
-                    let priceKey = trade.symbol.includes(':') ? trade.symbol : `${prefix}:${trade.symbol}`;
-
-                    const liveData = marketDataService.getPrice(priceKey);
-                    
-                    // Use BID for BUY trades (exit by selling) and ASK for SELL trades (exit by buying)
-                    const exitPrice = isBuy 
-                        ? (liveData?.bid || liveData?.ltp || entryPrice) 
-                        : (liveData?.ask || liveData?.ltp || entryPrice);
-                    
-                    const unrealizedPnl = (exitPrice - entryPrice) * qty * lotSize;
-                    
-                    stats.profitLoss[segment] += unrealizedPnl;
-
-                    if (!clientMap[trade.user_id]) {
-                        clientMap[trade.user_id] = {
-                            id: trade.user_id, username: trade.username,
-                            activePL: 0, activeTrades: 0, margin: 0
-                        };
-                    }
-                    clientMap[trade.user_id].activePL += unrealizedPnl;
-                    clientMap[trade.user_id].activeTrades += 1;
-
-                    // --- Dynamic Margin Calculation (matching Mobile App Portfolio) ---
-                    // We prioritize "Holding Margin Required" (divisor typically 100) for consistent display
-                    const dynamicMargin = MarginUtils.calculateTotalRequiredHoldingMargin([{
-                        ...trade,
-                        lot_size: lotSize
-                    }], userConfig);
-                    
-                    clientMap[trade.user_id].margin += dynamicMargin;
-                }
+                const dynamicMargin = holdingExposure * qty;
+                clientMap[trade.user_id].margin += dynamicMargin;
+            }
         });
 
         // 5. Finalize Stats Structure
@@ -232,12 +261,22 @@ const getClientLiveM2M = async (req, res) => {
             finalizedStats.activeSell[s] = stats.activeSell[s].toString();
         });
 
-        res.json({
-            clients: Object.values(clientMap).map(c => ({
+        const formattedClients = Object.values(clientMap).map(c => {
+            const netCapital = c.balance + c.activePL;
+            let shortfall = 0;
+            if (c.margin > netCapital && netCapital > 0) {
+                shortfall = c.margin - netCapital;
+            }
+            return {
                 ...c,
                 activePL: c.activePL.toFixed(2),
-                margin: c.margin.toFixed(2)
-            })),
+                margin: c.margin.toFixed(2),
+                marginShortfall: shortfall.toFixed(2)
+            };
+        });
+
+        res.json({
+            clients: formattedClients,
             stats: finalizedStats
         });
 
@@ -261,7 +300,7 @@ const getIndices = async (req, res) => {
     try {
         const nifty = marketDataService.getPrice('NSE:NIFTY 50') || { ltp: 0, change: 0, chg_pct: 0 };
         const banknifty = marketDataService.getPrice('NSE:NIFTY BANK') || { ltp: 0, change: 0, chg_pct: 0 };
-        
+
         const indices = [
             { name: 'NIFTY 50', ltp: nifty.ltp, change: nifty.change, pct: nifty.chg_pct },
             { name: 'BANK NIFTY', ltp: banknifty.ltp, change: banknifty.change, pct: banknifty.chg_pct }
@@ -297,9 +336,9 @@ const getWatchlist = async (req, res) => {
     }
 };
 
-module.exports = { 
-    getLiveMarket, 
-    getClientLiveM2M, 
+module.exports = {
+    getLiveMarket,
+    getClientLiveM2M,
     getMarketWatch,
     getIndices,
     getWatchlist,

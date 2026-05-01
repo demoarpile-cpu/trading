@@ -54,7 +54,6 @@ const getAllScrips = async (req, res) => {
                 kiteScripCacheTime = now;
             }
         } catch (kiteErr) {
-            console.warn('Kite instruments fetch failed, using DB only:', kiteErr.message);
         }
 
         // 3. Merge: Kite data + DB overrides
@@ -77,8 +76,93 @@ const getAllScrips = async (req, res) => {
         // 4. Fallback: DB only (if Kite not connected)
         res.json(dbRows);
     } catch (err) {
-        console.error('getScrips error:', err);
         res.status(500).send('Server Error');
+    }
+};
+
+const MCX_LOT_SIZES = {
+    'GOLD': 100, 'GOLDM': 10, 'GOLDPETAL': 1, 'GOLDGUINEA': 8,
+    'SILVER': 30, 'SILVERM': 5, 'SILVERMIC': 1,
+    'CRUDEOIL': 100, 'CRUDEOILM': 10,
+    'NATURALGAS': 1250, 'NATGASMINI': 250,
+    'COPPER': 2500, 'COPPERM': 500,
+    'ZINC': 5000, 'ZINCMINI': 1000,
+    'LEAD': 5000, 'LEADMINI': 1000,
+    'NICKEL': 1500, 'NICKELMINI': 100,
+    'ALUMINIUM': 5000, 'ALUMINI': 1000,
+    'MENTHAOIL': 360, 'COTTON': 25, 'COTTONCNDY': 20, 'BULLDE X': 1
+};
+
+const NFO_LOT_SIZES = {
+    'NIFTY': 50, 'BANKNIFTY': 50, 'FINNIFTY': 50, 'MIDCPNIFTY': 50, 'SENSEX': 10
+};
+
+const syncKiteInstruments = async (req, res) => {
+    try {
+        if (!kiteService.isAuthenticated()) {
+            return res.status(400).json({ error: 'Kite not connected. Please authenticate first.' });
+        }
+
+        const instruments = await kiteService.getInstruments();
+
+        if (!Array.isArray(instruments) || instruments.length === 0) {
+            return res.status(400).json({ error: 'No instruments received from Kite API' });
+        }
+
+        // Filter and normalize instruments
+        const seen = new Set();
+        const toSync = instruments
+            .filter(i => {
+                if (i.exchange === 'NSE' && i.instrument_type === 'EQ') return true;
+                if (i.exchange === 'MCX' && i.instrument_type === 'FUT') return true;
+                if (i.exchange === 'NFO' && i.instrument_type === 'FUT') return true;
+                return false;
+            })
+            .map(i => {
+                const isEQ = i.instrument_type === 'EQ';
+                const symbol = isEQ ? i.tradingsymbol : (i.name || i.tradingsymbol);
+                const exchange = i.exchange;
+                const marketType = exchange === 'MCX' ? 'MCX' : exchange === 'NFO' ? 'NFO' : 'EQUITY';
+
+                // Get lot_size from hardcoded map for MCX/NFO, use 1 for NSE
+                let lotSize = 1;
+                if (exchange === 'MCX') {
+                    lotSize = MCX_LOT_SIZES[symbol] || parseInt(i.lot_size) || 1;
+                } else if (exchange === 'NFO') {
+                    lotSize = NFO_LOT_SIZES[symbol] || parseInt(i.lot_size) || 1;
+                }
+
+                return { symbol, lot_size: lotSize, exchange, market_type: marketType };
+            })
+            .filter(i => {
+                const key = `${i.exchange}:${i.symbol}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+
+        // Upsert into scrip_data table
+        let syncCount = 0;
+        for (const item of toSync) {
+            try {
+                await db.execute(
+                    `INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type)
+                     VALUES (?, ?, ?, ?)
+                     ON DUPLICATE KEY UPDATE lot_size = VALUES(lot_size), market_type = VALUES(market_type)`,
+                    [item.symbol, item.lot_size, 50, item.market_type]
+                );
+                syncCount++;
+            } catch (err) {
+            }
+        }
+
+        res.json({
+            success: true,
+            message: `Successfully synced ${syncCount} instruments`,
+            count: syncCount
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 };
 
@@ -102,15 +186,11 @@ const getTickers = async (req, res) => {
 
         // If ?all=true (admin panel), return only user's created tickers
         if (req.query.all === 'true') {
-            console.log(`[getTickers] User ${userId} requesting their tickers`);
-
             // All users see only tickers they created
             const query = 'SELECT * FROM tickers WHERE created_by = ? ORDER BY id DESC';
             const params = [userId];
 
-            console.log(`[getTickers] Query params:`, params);
             const [rows] = await db.execute(query, params);
-            console.log(`[getTickers] Returned ${rows.length} tickers`);
             return res.json(rows);
         }
 
@@ -168,4 +248,4 @@ const deleteTicker = async (req, res) => {
     }
 };
 
-module.exports = { getAllScrips, updateScrip, getTickers, createTicker, updateTicker, deleteTicker };
+module.exports = { getAllScrips, syncKiteInstruments, updateScrip, getTickers, createTicker, updateTicker, deleteTicker };

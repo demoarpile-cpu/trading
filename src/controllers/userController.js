@@ -380,10 +380,12 @@ const updateClientSettings = async (req, res) => {
                 { name: 'MCX', enabled: configObj.mcxTrading, bType: configObj.mcxBrokerageType, bVal: configObj.mcxBrokerage, maxLot: configObj.mcxMaxLotScrip, exp: configObj.mcxExposureMultiplier },
                 { name: 'EQUITY', enabled: configObj.equityTrading, bType: 'PER_LOT', bVal: configObj.equityBrokerage, maxLot: configObj.equityMaxScrip, exp: configObj.equityExposureMultiplier },
                 { name: 'OPTIONS', enabled: configObj.indexOptionsTrading || configObj.equityOptionsTrading, bType: configObj.optionsIndexBrokerageType, bVal: configObj.optionsIndexBrokerage, maxLot: configObj.optionsIndexMaxScrip, exp: 1 },
-                { name: 'COMEX', enabled: configObj.comexTrading, bType: 'PER_LOT', bVal: configObj.comexBrokerage, maxLot: configObj.maxLotComex, exp: 1 },
-                { name: 'FOREX', enabled: configObj.forexTrading, bType: 'PER_LOT', bVal: configObj.forexBrokerage, maxLot: configObj.maxLotForex, exp: 1 },
-                { name: 'CRYPTO', enabled: configObj.cryptoTrading, bType: 'PER_LOT', bVal: configObj.cryptoBrokerage, maxLot: configObj.maxLotCrypto, exp: 1 }
+                { name: 'COMEX', enabled: configObj.comexTrading, bType: configObj.comexConfig?.brokerageType || 'PER_LOT', bVal: configObj.comexConfig?.brokerage || configObj.comexBrokerage, maxLot: configObj.comexConfig?.maxLotScrip || configObj.maxLotComex, exp: 1 },
+                { name: 'FOREX', enabled: configObj.forexTrading, bType: configObj.forexConfig?.brokerageType || 'PER_LOT', bVal: configObj.forexConfig?.brokerage || configObj.forexBrokerage, maxLot: configObj.forexConfig?.maxLotScrip || configObj.maxLotForex, exp: 1 },
+                { name: 'CRYPTO', enabled: configObj.cryptoTrading, bType: configObj.cryptoConfig?.brokerageType || 'PER_LOT', bVal: configObj.cryptoConfig?.brokerage || configObj.cryptoBrokerage, maxLot: configObj.cryptoConfig?.maxLotScrip || configObj.maxLotCrypto, exp: 1 }
             ];
+
+            console.log('[updateClientSettings] Syncing segments for user', userId, ':', segmentsToSync.map(s => ({ name: s.name, enabled: s.enabled, bVal: s.bVal, maxLot: s.maxLot })));
 
             for (const s of segmentsToSync) {
                 if (s.enabled !== undefined || s.bVal !== undefined) {
@@ -574,7 +576,19 @@ const getUserSegments = async (req, res) => {
                         { segment: 'CRYPTO', is_enabled: config.cryptoTrading ? 1 : 0, brokerage_type: config.cryptoConfig?.brokerageType || 'PER_LOT', brokerage_value: config.cryptoConfig?.brokerage || 0, max_lot_per_scrip: config.cryptoConfig?.maxLotScrip || 0, exposure_multiplier: 1, auto_square_off: config.autoSquareOff === 'Yes' ? 1 : 0, square_off_time: config.expirySquareOffTime }
                     ];
                     
-                    const finalSegments = mappedSegments.filter(s => s.is_enabled === 1 || parseFloat(s.brokerage_value) > 0);
+                    // Return all enabled segments regardless of brokerage value (zero is allowed)
+                    const finalSegments = mappedSegments.filter(s => s.is_enabled === 1);
+
+                    console.log(`[getUserSegments] Parsed config for user ${req.params.id}:`, {
+                        allSegments: mappedSegments.length,
+                        enabledSegments: finalSegments.length,
+                        forexTrading: config.forexTrading,
+                        cryptoTrading: config.cryptoTrading,
+                        comexTrading: config.comexTrading,
+                        forexBrokerage: config.forexConfig?.brokerage,
+                        cryptoBrokerage: config.cryptoConfig?.brokerage,
+                        comexBrokerage: config.comexConfig?.brokerage
+                    });
 
                     if (finalSegments.length > 0) {
                         return res.json(finalSegments);
@@ -644,7 +658,11 @@ const getBrokerClients = async (req, res) => {
         const [rows] = await db.execute(
             `SELECT u.id, u.username, u.full_name, u.email, u.mobile, u.status, u.role,
                     u.balance as ledger_balance, u.created_at, u.is_demo,
-                    p.username as parent_username
+                    p.username as parent_username,
+                    IFNULL((SELECT SUM(pnl) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as gross_pl,
+                    IFNULL((SELECT SUM(brokerage) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as brokerage,
+                    IFNULL((SELECT SUM(swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as swap_charges,
+                    IFNULL((SELECT SUM(pnl - brokerage - swap) FROM trades WHERE user_id = u.id AND status = 'CLOSED'), 0.00) as net_pl
              FROM users u
              LEFT JOIN client_settings cs ON cs.user_id = u.id
              LEFT JOIN users p ON u.parent_id = p.id
@@ -658,7 +676,6 @@ const getBrokerClients = async (req, res) => {
         );
         res.json(rows);
     } catch (err) {
-        console.error('getBrokerClients error:', err);
         res.status(500).json({ message: 'Server Error', error: err.message });
     }
 };
@@ -754,14 +771,26 @@ const recalculateBrokerage = async (req, res) => {
                 } else {
                     brokerage = trade.qty * rate;
                 }
+
+                // Ensure brokerage is never negative
+                brokerage = Math.max(0, brokerage);
             } else {
-                // Fallback to legacy config
-                const brokerMcxBrokerage = config.brokerMcxBrokerage || config.mcxLotBrokerage || {};
-                if (brokerMcxBrokerage[trade.symbol] !== undefined) {
-                    brokerage = trade.qty * parseFloat(brokerMcxBrokerage[trade.symbol]);
+                // Fallback to legacy config - respect mcxBrokerageType
+                const brokerageType = (config.mcxBrokerageType || 'per_crore').toLowerCase();
+                let symbolBrokerage;
+
+                if (brokerageType === 'per_lot') {
+                    // Per-lot mode: check mcxLotBrokerage first, then broker's
+                    symbolBrokerage = config.mcxLotBrokerage?.[trade.symbol] || config.brokerMcxBrokerage?.[trade.symbol];
+                } else {
+                    // Per-crore mode: only use broker's brokerage
+                    symbolBrokerage = config.brokerMcxBrokerage?.[trade.symbol];
+                }
+
+                if (symbolBrokerage !== undefined) {
+                    brokerage = trade.qty * parseFloat(symbolBrokerage);
                 } else {
                     const brokeragePerLot = parseFloat(config.mcxBrokerage || 0);
-                    const brokerageType = config.mcxBrokerageType || 'per_crore';
                     if (brokerageType === 'per_lot') {
                         brokerage = trade.qty * brokeragePerLot;
                     } else {
@@ -769,6 +798,9 @@ const recalculateBrokerage = async (req, res) => {
                         brokerage = (turnover / 10000000) * brokeragePerLot;
                     }
                 }
+
+                // Ensure brokerage is never negative
+                brokerage = Math.max(0, brokerage);
             }
 
             totalBrokerage += brokerage;

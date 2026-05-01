@@ -101,9 +101,8 @@ const startRolloverMarginJob = () => {
                                 ? (currentPrice - trade.entry_price) * trade.qty
                                 : (trade.entry_price - currentPrice) * trade.qty;
 
-                            const refundAmount = parseFloat(trade.margin_used) + pnl;
                             await db.execute('UPDATE trades SET status = "CLOSED", exit_price = ?, exit_time = NOW(), pnl = ? WHERE id = ?', [currentPrice, pnl, trade.id]);
-                            await db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', [refundAmount, trade.user_id]);
+                            await db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', [pnl, trade.user_id]);
                         }
                     } catch (err) {
                         console.error(`[RolloverCheck] Error processing trade #${trade.id}:`, err.message);

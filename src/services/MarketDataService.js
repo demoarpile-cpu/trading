@@ -140,10 +140,18 @@ class MarketDataService extends EventEmitter {
         if (this.ticker || this.isConnecting) return;
         this.isConnecting = true;
         try {
+            // Check if Zerodha is configured
+            if (!process.env.KITE_API_KEY) {
+                console.warn('⚠️ KITE_API_KEY not configured - Zerodha disabled');
+                this.isConnecting = false;
+                return;
+            }
+
             const repo = require('../repositories/KiteRepository');
             const userSession = await repo.getSessionByUserId(userId);
 
             if (!userSession || !userSession.access_token) {
+                console.warn('⚠️ No valid Zerodha session found for user - using mock engine');
                 this.isConnecting = false;
                 return;
             }
@@ -153,10 +161,12 @@ class MarketDataService extends EventEmitter {
                 access_token: userSession.access_token
             });
 
-            this.ticker.autoReconnect(true, 50, 5);
+            this.ticker.autoReconnect(false); // Disable auto-reconnect initially
+
+            let errorOccurred = false;
 
             this.ticker.on('connect', () => {
-                console.log('📈 Zerodha Ticker Connected');
+                console.log('✅ Zerodha Ticker Connected');
                 this.resubscribe();
             });
 
@@ -165,14 +175,64 @@ class MarketDataService extends EventEmitter {
             });
 
             this.ticker.on('error', (err) => {
-                console.error('⚠️ Zerodha Ticker Error:', err.message);
+                const errMsg = err?.message || String(err);
+                console.error('⚠️ Zerodha Ticker Error:', errMsg);
+
+                // Handle 403 Forbidden — token expired
+                if (errMsg.includes('403') || errMsg.includes('Forbidden')) {
+                    console.error('❌ Zerodha 403 Forbidden - Access token expired or invalid');
+                    console.log('💡 Solution: Need to login again at Zerodha');
+                    errorOccurred = true;
+                    this.ticker = null;
+                    try { this.ticker?.disconnect(); } catch(e) {}
+                    return;
+                }
+
+                // Other errors
+                console.error('❌ Critical Zerodha Error:', errMsg);
+                errorOccurred = true;
+                this.ticker = null;
             });
 
-            this.ticker.connect();
+            this.ticker.on('disconnect', () => {
+                console.log('🔌 Zerodha Ticker Disconnected');
+                if (this.ticker && !errorOccurred) {
+                    this.ticker = null;
+                }
+            });
+
+            this.ticker.on('noreconnect', () => {
+                console.log('⛔ Zerodha Ticker: Max reconnect attempts reached');
+                errorOccurred = true;
+                this.ticker = null;
+            });
+
+            try {
+                this.ticker.connect();
+                // Give ticker 5 seconds to connect before timing out
+                await new Promise((resolve) => {
+                    const timeout = setTimeout(() => {
+                        if (!this.ticker || !this.ticker.connected) {
+                            console.error('⏱️ Zerodha Ticker connection timeout');
+                            errorOccurred = true;
+                            this.ticker = null;
+                        }
+                        resolve();
+                    }, 5000);
+                });
+            } catch (connectErr) {
+                console.error('❌ Failed to connect Zerodha Ticker:', connectErr.message);
+                errorOccurred = true;
+                this.ticker = null;
+            }
         } catch (err) {
             console.error('⚠️ Zerodha Ticker init failed:', err.message);
+            this.ticker = null;
         } finally {
             this.isConnecting = false;
+            if (this.ticker === null || !this.ticker?.connected) {
+                console.log('ℹ️ Zerodha unavailable - will use mock engine for market data');
+            }
         }
     }
 

@@ -1,9 +1,10 @@
 const cron = require('node-cron');
 const db = require('../config/db');
+const { getMcxBaseScrip } = require('../utils/symbolHelper');
 
 /**
  * Runs every minute — checks if it's the configured square-off time
- * on any scrip's expiry day, then force-closes all open trades for that scrip.
+ * If holding margin > balance for a trade, force-closes it
  */
 const startExpirySquareOffJob = () => {
     cron.schedule('* * * * *', async () => {
@@ -52,57 +53,76 @@ const startExpirySquareOffJob = () => {
                     console.log(`[ExpirySquareOff] Admin #${rule.user_id}: Cancelling ${pendingOrders.length} pending orders...`);
                     for (const order of pendingOrders) {
                         try {
-                            const marginRefund = parseFloat(order.margin_used || 0);
                             await db.execute('UPDATE trades SET status = "CANCELLED", exit_time = NOW(), pnl = 0 WHERE id = ?', [order.id]);
-                            if (marginRefund > 0) {
-                                await db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', [marginRefund, order.user_id]);
-                            }
                         } catch (err) {
                             console.error(`[ExpirySquareOff] Failed to cancel pending order #${order.id}:`, err.message);
                         }
                     }
                 }
 
-                // ─── 4. SQUARE OFF EXPIRING SCRIPS FOR THESE TRADERS ───────────────────
-                const today = now.toISOString().split('T')[0];
-                const [expiringScrips] = await db.execute('SELECT symbol FROM scrip_data WHERE expiry_date = ?', [today]);
-                
-                if (expiringScrips.length > 0) {
-                    const symbols = expiringScrips.map(s => s.symbol);
-                    const [trades] = await db.execute(
-                        `SELECT t.id, t.user_id, t.symbol, t.type, t.qty, t.entry_price 
-                         FROM trades t
-                         WHERE t.status = 'OPEN' AND t.is_pending = 0 
-                         AND t.user_id IN (${descendantIds.join(',')})
-                         AND t.symbol IN (${symbols.map(() => '?').join(',')})`,
-                        symbols
-                    );
+                // ─── 4. CHECK HOLDING MARGIN FOR ALL OPEN TRADES ─────────────────────────
+                const [allOpenTrades] = await db.execute(
+                    `SELECT t.id, t.user_id, t.symbol, t.type, t.qty, t.entry_price, t.market_type,
+                            u.balance, cs.config_json
+                     FROM trades t
+                     JOIN users u ON t.user_id = u.id
+                     JOIN client_settings cs ON t.user_id = cs.user_id
+                     WHERE t.status = 'OPEN' AND t.is_pending = 0
+                     AND t.user_id IN (${descendantIds.join(',')})
+                     AND t.market_type = 'MCX'`
+                );
 
-                    if (trades.length > 0) {
-                        console.log(`[ExpirySquareOff] Admin #${rule.user_id}: Closing ${trades.length} expiring trades...`);
-                        const mockEngine = require('../utils/mockEngine');
+                if (allOpenTrades.length > 0) {
+                    const mockEngine = require('../utils/mockEngine');
+                    let closedCount = 0;
 
-                        for (const trade of trades) {
-                            try {
-                                let exitPrice = trade.entry_price;
-                                try {
-                                    const mp = mockEngine.getPrice(trade.symbol);
-                                    if (mp && mp > 0) exitPrice = mp;
-                                } catch (_) {}
+                    for (const trade of allOpenTrades) {
+                        try {
+                            const userBalance = parseFloat(trade.balance || 0);
+                            let userConfig = {};
+                            try { userConfig = JSON.parse(trade.config_json || '{}'); } catch (e) {}
 
-                                const pnl = trade.type === 'BUY'
-                                    ? (exitPrice - trade.entry_price) * trade.qty
-                                    : (trade.entry_price - exitPrice) * trade.qty;
+                            // Calculate holding margin for this trade
+                            const base = getMcxBaseScrip(trade.symbol);
+                            const defaultHolding = 1000000; // Default for MCX
+                            let holdingExposure = parseFloat(userConfig?.mcxHoldingMargin || defaultHolding);
 
+                            // Try to get per-instrument holding margin from config
+                            if (userConfig?.mcxLotMargins) {
+                                if (userConfig.mcxLotMargins[base]?.HOLDING) {
+                                    holdingExposure = parseFloat(userConfig.mcxLotMargins[base].HOLDING);
+                                } else if (userConfig.mcxLotMargins[`MCX:${base}`]?.HOLDING) {
+                                    holdingExposure = parseFloat(userConfig.mcxLotMargins[`MCX:${base}`].HOLDING);
+                                } else if (userConfig.mcxLotMargins[trade.symbol]?.HOLDING) {
+                                    holdingExposure = parseFloat(userConfig.mcxLotMargins[trade.symbol].HOLDING);
+                                }
+                            }
+
+                            const holdingMarginRequired = holdingExposure * trade.qty;
+
+                            // Check if balance < holding margin required
+                            if (userBalance < holdingMarginRequired) {
+                                console.log(`[ExpirySquareOff] 🚨 Holding Margin Check Failed: User #${trade.user_id}, Trade #${trade.id} (${trade.symbol}), Balance=${userBalance}, Required=${holdingMarginRequired}`);
+
+                                // Close at entry price (break-even) since this is a margin-based force closure, not price-based
+                                const exitPrice = trade.entry_price;
+                                const pnl = 0;
+
+                                // Close the trade
                                 await db.execute(
                                     `UPDATE trades SET status = 'CLOSED', exit_price = ?, pnl = ?, exit_time = NOW() WHERE id = ?`,
                                     [exitPrice, pnl, trade.id]
                                 );
                                 await db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', [pnl, trade.user_id]);
-                            } catch (err) {
-                                console.error(`[ExpirySquareOff] Failed to close trade #${trade.id}:`, err.message);
+                                closedCount++;
                             }
+                        } catch (err) {
+                            console.error(`[ExpirySquareOff] Failed to process trade #${trade.id}:`, err.message);
                         }
+                    }
+
+                    if (closedCount > 0) {
+                        console.log(`[ExpirySquareOff] ✅ Admin #${rule.user_id}: Closed ${closedCount} trades due to holding margin violation`);
                     }
                 }
             }
