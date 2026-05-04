@@ -30,11 +30,21 @@ class MockMarketEngine extends EventEmitter {
     }
 
     getPrice(symbol) {
-        if (!this.prices[symbol]) {
-            // Add symbol if missing, so it gets mocked henceforth
-            const basePrice = (Math.random() * 2000) + 100; // randomish start
-            this.prices[symbol] = parseFloat(basePrice.toFixed(2));
+        // ✅ First try exact match
+        if (this.prices[symbol]) {
+            return this.prices[symbol];
         }
+
+        // ✅ If not found, try extracting base symbol (e.g., "GOLD26JUN" → "GOLD")
+        const baseSymbol = symbol.replace(/\d+[A-Z]*$/g, '').trim(); // Remove date suffixes like "26JUN"
+        if (baseSymbol && baseSymbol !== symbol && this.prices[baseSymbol]) {
+            console.log(`[MockEngine] 📌 Symbol "${symbol}" → using base "${baseSymbol}" price ₹${this.prices[baseSymbol]}`);
+            return this.prices[baseSymbol];
+        }
+
+        // ✅ If still not found, create a mock price for the symbol
+        const basePrice = (Math.random() * 2000) + 100; // randomish start
+        this.prices[symbol] = parseFloat(basePrice.toFixed(2));
         return this.prices[symbol];
     }
 }

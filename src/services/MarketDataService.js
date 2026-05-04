@@ -3,6 +3,7 @@ const socketManager = require('../websocket/SocketManager');
 const EventEmitter = require('events');
 const WebSocket = require('ws');
 const axios = require('axios');
+const alertMonitor = require('./alertMonitorService'); // ✅ Import alert monitor
 
 // ── Binance Config ──
 const BINANCE_REST_BASE = 'https://api.binance.com/api/v3';
@@ -116,10 +117,21 @@ class MarketDataService extends EventEmitter {
         this.broadcastTimer = setInterval(() => {
             if (this.dirtySymbols.size === 0) return;
 
+            console.log(`[MarketDataService] 📡 Broadcasting ${this.dirtySymbols.size} dirty symbols`);
+
             const updates = {};
             this.dirtySymbols.forEach(sym => {
                 if (this.prices[sym]) {
                     updates[sym] = { ...this.prices[sym] };
+
+                    // ✅ CHECK PRICE ALERTS FOR THIS SYMBOL
+                    const ltp = this.prices[sym].ltp || this.prices[sym].price || 0;
+                    if (ltp > 0) {
+                        // Extract symbol without prefix (CRYPTO:BTC/USD → BTC/USD, MCX:GOLD → GOLD)
+                        const cleanSymbol = sym.includes(':') ? sym.split(':')[1] : sym;
+                        console.log(`[MarketDataService] 🎯 Passing to alert monitor: "${sym}" → "${cleanSymbol}" @ ₹${ltp}`);
+                        alertMonitor.checkAlerts(cleanSymbol, ltp);
+                    }
                 }
             });
             this.dirtySymbols.clear();
@@ -127,6 +139,10 @@ class MarketDataService extends EventEmitter {
             const io = socketManager.getIo();
             if (io) {
                 io.emit('price_update', updates);
+                // ✅ Initialize alert monitor with io instance (first time)
+                if (!alertMonitor.io) {
+                    alertMonitor.init(io);
+                }
             }
             this.emit('update', updates);
         }, this.broadcastInterval);
@@ -259,6 +275,11 @@ class MarketDataService extends EventEmitter {
                 depth: tick.depth && (tick.depth.buy?.length || tick.depth.sell?.length) ? tick.depth : (prev.depth || {}),
                 type: (symbol.startsWith('NSE') || symbol.startsWith('NFO') || symbol.startsWith('MCX')) ? symbol.split(':')[0] : (prev.type || 'NSE')
             };
+
+            // Log MCX prices for debugging
+            if (symbol && symbol.toUpperCase().includes('MCX') || symbol.toUpperCase().includes('GOLD')) {
+                console.log(`[KITE] 📈 MCX Update: ${symbol} = ₹${data.ltp}`);
+            }
 
             this.prices[symbol] = data;
             this.dirtySymbols.add(symbol);

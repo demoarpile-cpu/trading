@@ -4,6 +4,7 @@ const mockEngine = require('../utils/mockEngine');
 const bcrypt = require('bcryptjs');
 const { invalidateCache } = require('../utils/cacheManager');
 const { getMcxBaseScrip } = require('../utils/symbolHelper');
+const MarginService = require('../services/MarginService');
 
 
 /**
@@ -32,7 +33,9 @@ const placeOrder = async (req, res) => {
         is_pending = false,
         userId: traderId,
         transactionPassword,
-        exit_price
+        exit_price,
+        mcxExposureType = 'PER_LOT_BASIS',  // ✅ ADD THIS - from request body
+        tradeType = 'INTRADAY'              // ✅ ADD THIS - from request body (INTRADAY or HOLDING)
     } = req.body;
 
     const requesterId = req.user.id;
@@ -101,7 +104,11 @@ const placeOrder = async (req, res) => {
             );
             if (clientSettings.length > 0) {
                 clientConfig = JSON.parse(clientSettings[0].config_json || '{}');
-                console.log('[placeOrder] DEBUG - Client config loaded. banMcxLimitOrder=', clientConfig.banMcxLimitOrder);
+                console.log('[placeOrder] DEBUG - Full clientConfig:', JSON.stringify(clientConfig, null, 2));
+                console.log('[placeOrder] DEBUG - mcxLotMargins exists?', !!clientConfig.mcxLotMargins);
+                if (clientConfig.mcxLotMargins) {
+                    console.log('[placeOrder] DEBUG - mcxLotMargins keys:', Object.keys(clientConfig.mcxLotMargins));
+                }
             } else {
                 console.log('[placeOrder] DEBUG - No client config found for userId:', targetUserId);
             }
@@ -546,63 +553,85 @@ const placeOrder = async (req, res) => {
             }
         } catch (e) { console.error('Error fetching lotSize for margin:', e); }
 
-        // MCX Intraday/Holding Exposure
-        if (marketType === 'MCX') {
-            const turnover = executionPrice * qtyNum * lotSize;
-            const exposureValue = parseInt(clientConfig.mcxIntradayMargin || 500);
-            marginRequired = turnover / exposureValue;
-            console.log(`[placeOrder] ✅ MCX Margin: Turnover=${turnover}, Exposure=${exposureValue}, Margin=${marginRequired.toFixed(2)}`);
+        // ─── CALCULATE MARGIN WITH MARGIN SERVICE (Supports both PER_LOT_BASIS and PER_TURNOVER_BASIS) ──
+        let marginConfig = null;  // ✅ DECLARE OUTSIDE try-catch so it's accessible later!
+        let exposureTypeUsed = mcxExposureType || clientConfig?.mcxExposureType || 'PER_LOT_BASIS';  // ✅ PRIORITY ORDER!
+
+        // Normalize exposure type
+        if (exposureTypeUsed === 'per_lot') {
+            exposureTypeUsed = 'PER_LOT_BASIS';
+        } else if (exposureTypeUsed === 'per_crore' || exposureTypeUsed === 'per_turnover') {
+            exposureTypeUsed = 'PER_TURNOVER_BASIS';
         }
 
-        // EQUITY Intraday/Holding Exposure
-        if (marketType === 'EQUITY') {
-            const exposureValue = parseInt(clientConfig.equityIntradayMargin || 500);
-            const turnover = executionPrice * qtyNum * lotSize; // Added lotSize
+        try {
+            marginConfig = MarginService.getMarginConfig(sym, marketType, clientConfig, mcxExposureType);  // ✅ PASS mcxExposureType!
+            marginRequired = MarginService.calculateRequiredMargin({
+                qty: qtyNum,
+                price: executionPrice,
+                marginConfig: marginConfig,
+                tradeType: tradeType,  // ✅ USE REQUEST VALUE (from req.body)!
+                lotSize: lotSize
+            });
+            exposureTypeUsed = marginConfig.exposureType;
+            console.log(`[placeOrder] ✅ Margin calculated via MarginService (${marginConfig.exposureType}): ₹${marginRequired.toFixed(2)}`);
+        } catch (marginErr) {
+            // 🔴 STRICT FALLBACK - RESPECT THE SELECTED EXPOSURE TYPE!
+            console.warn(`[placeOrder] MarginService error, using fallback: ${marginErr.message}`);
+            console.log(`[placeOrder] DEBUG - Falling back with exposureType: ${exposureTypeUsed}`);
 
-            marginRequired = turnover / exposureValue;
-            console.log(`[placeOrder] ✅ EQUITY Exposure: Turnover=${turnover}, Exposure=${exposureValue}, MarginRequired=${marginRequired.toFixed(2)}`);
-        }
-
-        // ─── CRYPTO Intraday Exposure ──────────────────────────────────────
-        if (marketType === 'CRYPTO' && clientConfig.cryptoTrading) {
-            const cryptoConfig = clientConfig.cryptoConfig || {};
-            const exposureValue = parseInt(cryptoConfig.intradayMargin || 0);
-            const turnover = executionPrice * qtyNum * lotSize; // Added lotSize
-            if (exposureValue > 1) {
-                marginRequired = turnover / exposureValue;
+            if (exposureTypeUsed === 'PER_TURNOVER_BASIS' || exposureTypeUsed === 'per_turnover') {
+                // ✅ PER_TURNOVER_BASIS: margin = (price × qty) / exposure
+                const exposure = parseInt(clientConfig?.mcxIntradayMargin || 500);
+                const turnover = executionPrice * qtyNum * lotSize;
+                marginRequired = turnover / exposure;
+                console.log(`[placeOrder] Fallback PER_TURNOVER_BASIS: (${executionPrice} × ${qtyNum}) / ${exposure} = ₹${marginRequired.toFixed(2)}`);
             } else {
-                marginRequired = turnover * 0.1; // 10% default if not configured
+                // ✅ PER_LOT_BASIS: margin = qty × marginPerLot
+                let marginPerLot = 0;
+
+                if (marketType === 'MCX') {
+                    const baseSym = getMcxBaseScrip(sym) || sym;
+                    marginPerLot = parseFloat(clientConfig?.mcxLotMargins?.[baseSym]?.INTRADAY || 0);
+
+                    if (marginPerLot <= 0) {
+                        // Fallback to per-crore calculation if no lot margin configured
+                        console.warn(`[placeOrder] No INTRADAY margin for ${baseSym}, using exposure fallback`);
+                        const exposure = parseInt(clientConfig?.mcxIntradayMargin || 500);
+                        const turnover = executionPrice * qtyNum * lotSize;
+                        marginRequired = turnover / exposure;
+                    } else {
+                        marginRequired = qtyNum * marginPerLot;
+                        console.log(`[placeOrder] Fallback PER_LOT_BASIS: ${qtyNum} × ₹${marginPerLot} = ₹${marginRequired.toFixed(2)}`);
+                    }
+                } else if (marketType === 'EQUITY') {
+                    const baseSym = sym.toUpperCase();
+                    marginPerLot = parseFloat(clientConfig?.equityLotMargins?.[baseSym]?.INTRADAY || 0);
+
+                    if (marginPerLot <= 0) {
+                        const exposure = parseInt(clientConfig?.equityIntradayMargin || 500);
+                        const turnover = executionPrice * qtyNum * lotSize;
+                        marginRequired = turnover / exposure;
+                    } else {
+                        marginRequired = qtyNum * marginPerLot;
+                    }
+                } else {
+                    marginRequired = (executionPrice * qtyNum * lotSize) * 0.1;
+                    console.log(`[placeOrder] Fallback DEFAULT (10%): ₹${marginRequired.toFixed(2)}`);
+                }
             }
-            console.log(`[placeOrder] ✅ CRYPTO Exposure: Turnover=${turnover}, Exposure=${exposureValue}, MarginRequired=${marginRequired.toFixed(2)}`);
+
+            // ✅ CREATE FALLBACK marginConfig WITH exposureType
+            marginConfig = {
+                exposureType: exposureTypeUsed,
+                INTRADAY: 0,
+                HOLDING: 0
+            };
+
+            console.log(`[placeOrder] ⚠️  Using fallback margin: ₹${marginRequired.toFixed(2)} (${exposureTypeUsed})`);
         }
 
-        // ─── FOREX Intraday Exposure ──────────────────────────────────────
-        if (marketType === 'FOREX' && clientConfig.forexTrading) {
-            const forexConfig = clientConfig.forexConfig || {};
-            const exposureValue = parseInt(forexConfig.intradayMargin || 0);
-            const turnover = executionPrice * qtyNum * lotSize; // Added lotSize
-            if (exposureValue > 1) {
-                marginRequired = turnover / exposureValue;
-            } else {
-                marginRequired = turnover * 0.1;
-            }
-            console.log(`[placeOrder] ✅ FOREX Exposure: Turnover=${turnover}, Exposure=${exposureValue}, MarginRequired=${marginRequired.toFixed(2)}`);
-        }
-
-        // ─── COMEX Intraday Exposure ──────────────────────────────────────
-        if (marketType === 'COMEX' && clientConfig.comexTrading) {
-            const comexConfig = clientConfig.comexConfig || {};
-            const exposureValue = parseInt(comexConfig.intradayMargin || 0);
-            const turnover = executionPrice * qtyNum * lotSize; // Added lotSize
-            if (exposureValue > 1) {
-                marginRequired = turnover / exposureValue;
-            } else {
-                marginRequired = turnover * 0.1;
-            }
-            console.log(`[placeOrder] ✅ COMEX Exposure: Turnover=${turnover}, Exposure=${exposureValue}, MarginRequired=${marginRequired.toFixed(2)}`);
-        }
-
-        // Fallback if no exposure calculated
+        // Ensure margin is calculated
         if (marginRequired <= 0) {
             marginRequired = (executionPrice * qtyNum * lotSize) * 0.1; // 10% default
         }
@@ -969,16 +998,32 @@ const placeOrder = async (req, res) => {
         console.log('Executing with:', { targetUserId, symbol, type, executionPrice, marginRequired, marketType });
 
         // 8. Insert Trade
+        // ✅ SAFETY CHECK: Ensure marginConfig exists and has exposureType
+        if (!marginConfig || !marginConfig.exposureType) {
+            console.error('❌ CRITICAL: marginConfig missing exposureType!', { marginConfig, tradeType, mcxExposureType });
+            return res.status(500).json({
+                message: 'Internal Server Error',
+                error: 'Margin configuration missing exposureType'
+            });
+        }
+
+        // ✅ MULTIPLY QUANTITY BY LOT SIZE FOR MCX (User enters lots, we store actual units)
+        let actualQty = qtyNum;
+        if (marketType === 'MCX' && lotSize && lotSize > 1) {
+            actualQty = qtyNum * lotSize;
+            console.log(`[placeOrder] 📦 MCX LOT CONVERSION: ${qtyNum} lots × ${lotSize} = ${actualQty} units`);
+        }
+
         const [result] = await db.execute(
             `INSERT INTO trades
-                (user_id, symbol, type, order_type, qty, entry_price, exit_price, margin_used, is_pending, market_type, status, trade_ip, created_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                (user_id, symbol, type, order_type, qty, entry_price, exit_price, margin_used, is_pending, market_type, status, trade_ip, created_by, trade_type, margin_type, entry_time)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
             [
                 targetUserId,
                 sym,
                 type.toUpperCase(),
                 order_type,
-                qtyNum,
+                actualQty,
                 executionPrice,
                 exit_price ? parseFloat(exit_price) : null,
                 marginRequired,
@@ -986,7 +1031,9 @@ const placeOrder = async (req, res) => {
                 marketType,
                 'OPEN',
                 tradeIp,
-                requesterId
+                requesterId,
+                tradeType,  // ✅ NOW SAFELY AVAILABLE
+                marginConfig.exposureType  // ✅ NOW SAFELY AVAILABLE
             ]
         );
 
@@ -1000,11 +1047,13 @@ const placeOrder = async (req, res) => {
             message: 'Order placed successfully',
             tradeId: result.insertId,
             executionPrice,
-            marginUsed: marginRequired
+            marginUsed: marginRequired,
+            qtyInput: qtyNum,
+            qtyStored: actualQty
         });
 
         // Log the trade placement
-        await logAction(requesterId, 'PLACE_ORDER', 'trades', `Placed ${type.toUpperCase()} order for ${sym} (Qty: ${qtyNum}, Price: ${executionPrice}) for user #${targetUserId}`);
+        await logAction(requesterId, 'PLACE_ORDER', 'trades', `Placed ${type.toUpperCase()} order for ${sym} (Qty: ${actualQty}, Price: ${executionPrice}) for user #${targetUserId}`);
 
 
     } catch (err) {
@@ -1123,22 +1172,9 @@ const getTrades = async (req, res) => {
                 const configMap = {};
                 configRows.forEach(c => { configMap[c.user_id] = JSON.parse(c.config_json || '{}'); });
 
-                // Fetch lot sizes
-                const [scripRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
-                const lotSizeMap = {};
-                scripRows.forEach(s => { lotSizeMap[s.symbol] = parseFloat(s.lot_size || 1); });
-
-                const MarginUtils = require('../utils/MarginUtils');
-                rows.forEach(trade => {
-                    if (trade.status === 'OPEN') {
-                        const config = configMap[trade.user_id] || {};
-                        const lotSize = lotSizeMap[trade.symbol] || 1;
-                        trade.margin_used = MarginUtils.calculateTotalRequiredHoldingMargin([{
-                            ...trade,
-                            lot_size: lotSize
-                        }], config);
-                    }
-                });
+                // ❌ REMOVED: Don't recalculate margin_used - use the value stored in database
+                // The margin_used is already correctly calculated and stored when trade is placed
+                // Recalculating it here overwrites INTRADAY margin with HOLDING margin calculation
             }
         }
 
@@ -1591,8 +1627,53 @@ const modifyPendingOrder = async (req, res) => {
         const params = [];
 
         if (qty !== undefined && qty !== null) {
+            let qtyToStore = parseInt(qty);
+
+            // ✅ FOR MCX: Multiply by LOT size to get actual units
+            if (trade.market_type === 'MCX') {
+                try {
+                    const MCX_LOT_SIZES = {
+                        'GOLD': 100, 'GOLDM': 10, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
+                        'SILVER': 30, 'SILVERM': 5, 'SILVERMIC': 1,
+                        'CRUDEOIL': 100, 'CRUDEOILM': 10,
+                        'COPPER': 250, 'COPPERMIC': 1, 'NICKEL': 250, 'NICKELMINI': 10,
+                        'ZINC': 250, 'ZINCY': 250, 'LEAD': 250, 'LEADMINI': 10,
+                        'ALUMINIUM': 1000, 'ALUMINI': 1000, 'NATURALGAS': 1250,
+                        'MENTHAOIL': 360, 'COTTON': 100, 'BULLDEX': 100, 'CRUDEOIL MINI': 10
+                    };
+
+                    const [configRows] = await db.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [trade.user_id]);
+                    let lotSize = 1;
+
+                    if (configRows.length > 0) {
+                        const clientConfig = JSON.parse(configRows[0].config_json || '{}');
+                        const baseSym = getMcxBaseScrip(trade.symbol) || trade.symbol.toUpperCase();
+                        lotSize = parseFloat(clientConfig?.mcxLotMargins?.[baseSym]?.LOT || 1);
+                    }
+
+                    if (!lotSize || lotSize <= 1) {
+                        const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
+                        if (scripRows.length > 0) {
+                            lotSize = parseFloat(scripRows[0].lot_size || 1);
+                        } else {
+                            const baseSym = getMcxBaseScrip(trade.symbol);
+                            if (baseSym && MCX_LOT_SIZES[baseSym]) {
+                                lotSize = MCX_LOT_SIZES[baseSym];
+                            }
+                        }
+                    }
+
+                    if (lotSize && lotSize > 1) {
+                        qtyToStore = parseInt(qty) * lotSize;
+                        console.log(`[modifyPendingOrder] 📦 MCX LOT CONVERSION: ${qty} lots × ${lotSize} = ${qtyToStore} units`);
+                    }
+                } catch (e) {
+                    console.warn('[modifyPendingOrder] Warning: Could not fetch lotSize, using qty as-is:', e.message);
+                }
+            }
+
             updates.push('qty = ?');
-            params.push(parseInt(qty));
+            params.push(qtyToStore);
         }
         if (price !== undefined && price !== null) {
             updates.push('entry_price = ?');
@@ -1613,4 +1694,86 @@ const modifyPendingOrder = async (req, res) => {
     }
 };
 
-module.exports = { placeOrder, getTrades, getTradeById, getGroupTrades, closeTrade, deleteTrade, updateTrade, restoreTrade, modifyPendingOrder };
+/**
+ * Set Target & Stop Loss for a trade
+ * Called from mobile app when user sets target/SL
+ */
+const setTargetSL = async (req, res) => {
+    try {
+        const tradeId = req.params.id;
+        const { targetPrice, stopLoss } = req.body;
+        const userId = req.user?.id;
+
+        if (!userId) {
+            return res.status(401).json({ message: 'Unauthorized: User not found in request' });
+        }
+
+        // Fetch trade to verify ownership
+        const [trades] = await db.execute('SELECT * FROM trades WHERE id = ?', [tradeId]);
+        if (trades.length === 0) {
+            return res.status(404).json({ message: 'Trade not found' });
+        }
+
+        const trade = trades[0];
+
+        // Authorization check
+        if (trade.user_id !== userId && req.user.role === 'TRADER') {
+            return res.status(403).json({ message: 'Not authorized to modify this trade' });
+        }
+
+        // Only open trades can have target/SL set
+        if (trade.status !== 'OPEN') {
+            return res.status(400).json({ message: 'Trade is not open' });
+        }
+
+        // Validate prices - convert NaN to null for database binding
+        let target = null;
+        let sl = null;
+
+        if (targetPrice) {
+            const parsed = parseFloat(targetPrice);
+            target = isNaN(parsed) ? null : parsed;
+        }
+
+        if (stopLoss) {
+            const parsed = parseFloat(stopLoss);
+            sl = isNaN(parsed) ? null : parsed;
+        }
+
+        if (target && sl) {
+            if (trade.type === 'BUY' && target <= sl) {
+                return res.status(400).json({ message: 'For BUY trades: Target must be > Stop Loss' });
+            }
+            if (trade.type === 'SELL' && target >= sl) {
+                return res.status(400).json({ message: 'For SELL trades: Target must be < Stop Loss' });
+            }
+        }
+
+        // Validate all parameters before database update
+        console.log(`[TargetSL] DEBUG - tradeId: ${tradeId}, target: ${target}, sl: ${sl}`);
+        console.log(`[TargetSL] DEBUG - Types - tradeId: ${typeof tradeId}, target: ${typeof target}, sl: ${typeof sl}`);
+
+        if (tradeId === undefined || tradeId === null) {
+            return res.status(400).json({ message: 'Trade ID is required' });
+        }
+
+        // Update trade with target & SL
+        await db.execute(
+            'UPDATE trades SET target_price = ?, stop_loss = ? WHERE id = ?',
+            [target, sl, tradeId]
+        );
+
+        console.log(`[TargetSL] ✅ Trade #${tradeId} updated - Target: ${target}, SL: ${sl}`);
+
+        res.json({
+            message: 'Target & Stop Loss set successfully',
+            targetPrice: target,
+            stopLoss: sl
+        });
+    } catch (err) {
+        console.error('❌ Set Target/SL Error:', err.message || err);
+        res.status(500).json({ message: `Failed to set Target/SL: ${err.message || 'Unknown error'}` });
+    }
+};
+
+module.exports = { placeOrder, getTrades, getTradeById, getGroupTrades, closeTrade, deleteTrade, updateTrade, restoreTrade, modifyPendingOrder, setTargetSL };

@@ -206,6 +206,8 @@ const runMigrations = async () => {
     await addColumn('trades', 'brokerage', "DECIMAL(18,4) DEFAULT 0 AFTER pnl");
     await addColumn('trades', 'swap', "DECIMAL(18,4) DEFAULT 0 AFTER brokerage");
     await addColumn('trades', 'created_by', "INT DEFAULT NULL AFTER trade_ip");
+    await addColumn('trades', 'trade_type', "VARCHAR(50) DEFAULT 'INTRADAY' AFTER created_by");
+    await addColumn('trades', 'margin_type', "VARCHAR(50) DEFAULT 'PER_LOT_BASIS' AFTER trade_type");
     await addColumn('scrip_data', 'market_type', "ENUM('MCX','EQUITY','COMEX','FOREX','CRYPTO') DEFAULT 'MCX' AFTER margin_req");
     await addColumn('scrip_data', 'expiry_date', "DATE DEFAULT NULL AFTER market_type");
 
@@ -520,6 +522,35 @@ const runMigrations = async () => {
 
     // Add target_user_ids column for multi-user targeting
     await addColumn('notifications', 'target_user_ids', 'TEXT DEFAULT NULL');
+
+    // ─── PRICE ALERTS ──────────────────────────────────────────────────────────
+    await db.execute(`
+        CREATE TABLE IF NOT EXISTS alerts (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            user_id     INT NOT NULL,
+            symbol      VARCHAR(50) NOT NULL,
+            type        ENUM('above', 'below') NOT NULL,
+            target_price DECIMAL(18, 2) NOT NULL,
+            status      ENUM('active', 'triggered', 'inactive') DEFAULT 'active',
+            triggered_at TIMESTAMP NULL,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            INDEX idx_user_id (user_id),
+            INDEX idx_symbol (symbol),
+            INDEX idx_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await db.execute(`
+        CREATE TABLE IF NOT EXISTS user_alert_settings (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            user_id     INT NOT NULL UNIQUE,
+            settings_json TEXT,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
 
     // ─── 11. SEED DATA ─────────────────────────────────────────────────────────
 

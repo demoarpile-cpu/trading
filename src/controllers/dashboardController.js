@@ -342,6 +342,85 @@ module.exports = {
     getMarketWatch,
     getIndices,
     getWatchlist,
-    getBrokerM2M: async (req, res) => res.json([])
+    getBrokerM2M: async (req, res) => {
+        try {
+            const brokerId = req.user.id;
+            const db = require('../config/db');
+            const mockEngine = require('../utils/mockEngine');
+            const { getMcxBaseScrip } = require('../utils/symbolHelper');
+
+            // 1. Get all traders under this broker
+            const [traders] = await db.execute(
+                'SELECT id, username, balance FROM users WHERE parent_id = ? AND role = "TRADER"',
+                [brokerId]
+            );
+
+            if (!traders.length) {
+                return res.json([]);
+            }
+
+            const traderIds = traders.map(t => t.id);
+
+            // 2. Get all open trades for these traders
+            const [trades] = await db.execute(
+                `SELECT t.id, t.user_id, t.symbol, t.type, t.qty, t.entry_price, t.market_type,
+                        u.username
+                 FROM trades t
+                 JOIN users u ON t.user_id = u.id
+                 WHERE t.status = 'OPEN' AND t.user_id IN (${traderIds.join(',')})`,
+                []
+            );
+
+            // 3. Calculate M2M for each trader
+            const INSTRUMENT_META = {
+                'CRUDEOIL': 100, 'NATURALGAS': 1250, 'GOLD': 100, 'GOLDM': 10,
+                'SILVER': 30, 'SILVERM': 5, 'COPPER': 2500, 'ZINC': 5000,
+                'NICKEL': 1500, 'LEAD': 5000, 'ALUMINIUM': 5000, 'MENTHAOIL': 360,
+                'COTTON': 25, 'BULLDEX': 1, 'GOLDGUINEA': 8, 'GOLDPETAL': 1
+            };
+
+            const traderM2M = {};
+            traders.forEach(t => {
+                traderM2M[t.id] = {
+                    user_id: t.id,
+                    username: t.username,
+                    live_pnl: 0,
+                    active_trades: 0,
+                    margin_used: 0
+                };
+            });
+
+            // 4. Calculate P/L for each open trade
+            for (const trade of trades) {
+                let currentPrice = trade.entry_price;
+                try {
+                    const cleanSymbol = getMcxBaseScrip(trade.symbol);
+                    const mp = mockEngine.getPrice(cleanSymbol);
+                    if (mp && mp > 0) currentPrice = mp;
+                } catch (_) {}
+
+                const baseSymbol = Object.keys(INSTRUMENT_META).find(key =>
+                    trade.symbol.toUpperCase().includes(key)
+                );
+                const multiplier = baseSymbol ? INSTRUMENT_META[baseSymbol] : 1;
+
+                const pnl = trade.type === 'BUY'
+                    ? (currentPrice - trade.entry_price) * trade.qty * multiplier
+                    : (trade.entry_price - currentPrice) * trade.qty * multiplier;
+
+                if (traderM2M[trade.user_id]) {
+                    traderM2M[trade.user_id].live_pnl += pnl;
+                    traderM2M[trade.user_id].active_trades += 1;
+                }
+            }
+
+            // 5. Return as array
+            const result = Object.values(traderM2M);
+            res.json(result);
+        } catch (err) {
+            console.error('getBrokerM2M error:', err);
+            res.status(500).json({ error: err.message });
+        }
+    }
 };
 

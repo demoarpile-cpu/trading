@@ -50,6 +50,8 @@ const bankRoutes = require('./routes/bankRoutes');
 const newClientBankRoutes = require('./routes/newClientBankRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const alertRoutes = require('./routes/alertRoutes');
+const marginRoutes = require('./routes/marginRoutes');
 const { logIp } = require('./middleware/logger');
 
 // Middleware
@@ -88,6 +90,8 @@ app.use('/api/bank', bankRoutes);
 app.use('/api/new-client-bank', newClientBankRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/alerts', alertRoutes);
+app.use('/api/margin', marginRoutes);
 app.use('/api/paper-trading', paperRoutes);
 
 const marketDataRoutes = require('./routes/marketDataRoutes');
@@ -192,14 +196,18 @@ runMigrations()
         // Initialize Paper Trading Engine after DB is ready (if applicable)
         paperTradingEngine.start();
 
-        // Start Expiry Square-off, Rollover Margin, and RMS Monitoring cron jobs
+        // Start Expiry Square-off, Rollover Margin, RMS, Target/SL, and Alert Monitoring services
         const { startExpirySquareOffJob } = require('./services/expirySquareOffService');
         const { startRolloverMarginJob } = require('./services/rolloverMarginService');
         const rmsService = require('./services/RMSService');
+        const { startTargetSLMonitoring } = require('./services/targetSLService');
+        const { startAlertMonitoring } = require('./services/alertMonitoringService');
 
         startExpirySquareOffJob();
         startRolloverMarginJob();
         rmsService.start(10000); // Check risk every 10 seconds
+        startTargetSLMonitoring(); // Monitor target/SL every 5 seconds
+        startAlertMonitoring(); // Monitor price alerts every 3 seconds
 
         // Initialize Market Data (Real Data Only - No Mock Fallback)
         try {
