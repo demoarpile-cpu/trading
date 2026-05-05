@@ -321,15 +321,37 @@ const getMe = async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT id, username, role, full_name, email, mobile, city, parent_id, balance, credit_limit FROM users WHERE id = ?', [req.user.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
-    
+
     const user = rows[0];
-    
+
     // Fetch parent role if applicable
     let parentRole = null;
     if (user.parent_id) {
       const [pRows] = await db.execute('SELECT role FROM users WHERE id = ?', [user.parent_id]);
       if (pRows.length > 0) parentRole = pRows[0].role;
     }
+
+    // Fetch client settings (config_json and trade_equity_units) if user is a trader
+    let configJson = null;
+    let tradeEquityUnits = false;
+    if (user.role === 'TRADER') {
+      const [settingsRows] = await db.execute('SELECT config_json, trade_equity_units FROM client_settings WHERE user_id = ?', [req.user.id]);
+      if (settingsRows.length > 0) {
+        configJson = settingsRows[0].config_json;
+        tradeEquityUnits = !!settingsRows[0].trade_equity_units;
+      }
+    }
+
+    // Parse config_json and add trade_equity_units to it
+    let config = {};
+    if (configJson && configJson.trim()) {
+      try {
+        config = JSON.parse(configJson);
+      } catch (e) {
+        config = {};
+      }
+    }
+    config.trade_equity_units = tradeEquityUnits;
 
     res.json({
       id: user.id,
@@ -342,7 +364,8 @@ const getMe = async (req, res) => {
       parent_id: user.parent_id,
       parentRole: parentRole,
       balance: user.balance,
-      creditLimit: user.credit_limit
+      creditLimit: user.credit_limit,
+      config_json: config
     });
   } catch (err) {
     console.error(err);

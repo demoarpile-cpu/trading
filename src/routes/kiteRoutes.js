@@ -141,7 +141,7 @@ const db = require('../config/db');
 async function loadGroupsFromDb() {
     try {
         const [rows] = await db.execute(`
-            SELECT mg.name as group_name, mgi.symbol 
+            SELECT mg.name as group_name, mgi.symbol
             FROM market_group_items mgi
             JOIN market_groups mg ON mgi.group_id = mg.id
             WHERE mg.is_active = 1
@@ -160,10 +160,9 @@ async function loadGroupsFromDb() {
         MCX_BASES = groups['MCX FUTURES'] || [];
         NFO_INDICES = groups['NFO INDICES'] || [];
         NSE_INDICES = (groups['NSE INDICES'] || []).map(s => `NSE:${s}`);
-        
+
         ALL_NSE_STOCKS = [...new Set([...NIFTY50, ...BANKNIFTY, ...MIDCAP, ...FINNIFTY])];
 
-        console.log(`✅ Loaded Market Groups from DB: N50(${NIFTY50.length}), BN(${BANKNIFTY.length}), MCX(${MCX_BASES.length}), INDICES(${NSE_INDICES.length})`);
     } catch (err) {
         console.error('❌ Failed to load market groups from DB:', err.message);
     }
@@ -752,20 +751,14 @@ let _precomputedQuerySig = '';
 function _getPrecomputed(instruments, query) {
     const today = new Date();
 
-    // ── NSE (default = curated list from user paste, validated against live NSE EQ/BE) ──
+    // ── NSE ──
     const nseList = String(query.nse || '').trim();
-    const rawNse = nseList
-        ? nseList.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
-        : loadUserNseEquityWatchlist();
-    const nseEqSyms = new Set(
-        instruments
-            .filter((i) => i.exchange === 'NSE' && ['EQ', 'BE'].includes(String(i.instrument_type || '').toUpperCase()))
-            .map((i) => i.tradingsymbol)
-    );
-    let nseSymbols = [...new Set(rawNse.filter((s) => nseEqSyms.has(s)))].sort((a, b) => a.localeCompare(b));
-    if (nseSymbols.length === 0) {
-        nseSymbols = [...new Set(NIFTY50.filter((s) => nseEqSyms.has(s)))].sort((a, b) => a.localeCompare(b));
-        if (nseSymbols.length === 0) nseSymbols = NIFTY50.slice();
+    let nseSymbols = [];
+    if (nseList) {
+        nseSymbols = nseList.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+    } else {
+        const user = loadUserNseEquityWatchlist();
+        nseSymbols = user && user.length > 0 ? user : NIFTY50_SYMBOLS.slice();
     }
     const mcxOptSymQuery = String(query.mcxOptSymbols || '').trim();
     const mcxOptRequested = (mcxOptSymQuery
@@ -783,6 +776,12 @@ function _getPrecomputed(instruments, query) {
     console.log('⚡ Precomputing watchlist symbol map...');
 
     const nseKeys = nseSymbols.map((s) => `NSE:${s}`);
+
+    // ── Add NSE INDICES (NIFTY 50, BANK NIFTY, etc) ──
+    const nseIndicesKeys = NSE_INDICES.length > 0
+        ? NSE_INDICES
+        : ['NSE:NIFTY 50', 'NSE:NIFTY BANK', 'NSE:NIFTY FIN SERVICE', 'NSE:NIFTY MID SELECT'];
+    const allNseKeys = Array.from(new Set([...nseKeys, ...nseIndicesKeys]));
 
     // ── NFO underlyings ──
     const nfoUnderlyings = String(query.nfoUnderlyings || 'NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY')
@@ -855,10 +854,9 @@ function _getPrecomputed(instruments, query) {
         }
     }
 
-    _precomputed = { nseKeys, nfoConfig, nfoFutKeys, nfoFutMeta, mcxFutBases, mcxFutByBase, mcxOptRequested, mcxOptRange, ltpKeys, nfoOptIndex, mcxOptIndex, indexSymbolMap };
+    _precomputed = { nseKeys: allNseKeys, nfoConfig, nfoFutKeys, nfoFutMeta, mcxFutBases, mcxFutByBase, mcxOptRequested, mcxOptRange, ltpKeys, nfoOptIndex, mcxOptIndex, indexSymbolMap };
     _precomputedInstrTime = instrumentsCacheTime;
     _precomputedQuerySig = querySig;
-    console.log(`⚡ Precomputed: NSE=${nseKeys.length} | NFO underlyings=${nfoConfig.length} | MCX bases=${mcxFutBases.length} | LTP keys=${ltpKeys.length}`);
     return _precomputed;
 }
 

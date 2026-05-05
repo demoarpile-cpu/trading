@@ -22,7 +22,6 @@ const initializeCache = async () => {
             socket: {
                 reconnectStrategy: (retries) => {
                     if (retries > 3) {
-                        console.warn('[Cache] Redis reconnection failed, continuing without cache');
                         return new Error('Redis max retries exceeded');
                     }
                     return retries * 100;
@@ -31,19 +30,16 @@ const initializeCache = async () => {
         });
 
         redisClient.on('error', (err) => {
-            console.warn('[Cache] ⚠️ Redis error:', err.message);
             isRedisConnected = false;
         });
 
         redisClient.on('connect', () => {
-            console.log('[Cache] ✅ Redis connected');
             isRedisConnected = true;
         });
 
         await redisClient.connect();
         isRedisConnected = true;
     } catch (err) {
-        console.warn('[Cache] Redis not available, caching disabled:', err.message);
         isRedisConnected = false;
     }
 };

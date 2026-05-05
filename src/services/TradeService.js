@@ -32,6 +32,10 @@ class TradeService {
 
             const clientConfig = JSON.parse(trade.config_json || '{}');
             const marginToRelease = parseFloat(trade.margin_used || 0);
+            const mType = (trade.market_type || '').toUpperCase();
+
+            // Check if this is an EQUITY trade in units mode (not lots mode)
+            const isEquityUnitsMode = mType === 'EQUITY' && clientConfig.trade_equity_units === true;
 
             // 2. Handle Pending Orders
             if (trade.is_pending == 1) {
@@ -51,7 +55,6 @@ class TradeService {
             // 3. Normal Market Order Closure
             // Use multiplier from INSTRUMENT_META (hardcoded values for MCX/NSE)
             let lotSize = 1;
-            const mType = (trade.market_type || '').toUpperCase();
 
             // INSTRUMENT_META multipliers (from TradeContext.js)
             const INSTRUMENT_META = {
@@ -64,7 +67,11 @@ class TradeService {
                 'TCS': 1, 'RELIANCE': 1, 'SBIN': 1, 'INFY': 1
             };
 
-            if (mType === 'MCX' || mType === 'EQUITY') {
+            // If EQUITY trade is in units mode, don't apply lot multiplier
+            if (isEquityUnitsMode) {
+                lotSize = 1;
+                console.log(`[TradeService] EQUITY units mode detected - lot size forced to 1`);
+            } else if (mType === 'MCX' || mType === 'EQUITY') {
                 const baseSymbol = Object.keys(INSTRUMENT_META).find(key => trade.symbol.toUpperCase().includes(key));
                 if (baseSymbol && INSTRUMENT_META[baseSymbol]) {
                     lotSize = INSTRUMENT_META[baseSymbol];
@@ -90,12 +97,12 @@ class TradeService {
             let pnl;
             if (providedPnl !== null && providedPnl !== undefined) {
                 pnl = parseFloat(providedPnl);
-                console.log(`[TradeService] Using provided P/L: ${pnl}`);
+                console.log(`[TradeService] Using provided P/L: ${pnl} (Mode: ${isEquityUnitsMode ? 'UNITS' : 'LOTS'})`);
             } else {
                 pnl = trade.type === 'BUY'
                     ? (finalExitPrice - trade.entry_price) * trade.qty * lotSize
                     : (trade.entry_price - finalExitPrice) * trade.qty * lotSize;
-                console.log(`[TradeService] Calculated P/L: ${pnl}`);
+                console.log(`[TradeService] Calculated P/L: ${pnl} (Mode: ${isEquityUnitsMode ? 'UNITS' : 'LOTS'}, LotSize: ${lotSize})`);
             }
 
             // 4. Calculate Brokerage & Swap
@@ -251,8 +258,9 @@ class TradeService {
             await connection.commit();
 
             // 6. Housekeeping (Logs & Cache)
-            await logAction(requesterId || trade.user_id, 'CLOSE_TRADE', 'trades', 
-                `Closed trade #${trade.id} @ ${finalExitPrice}. PnL: ${pnl.toFixed(2)}, Brokerage: ${brokerage}, Swap: ${swap}`);
+            const tradeMode = isEquityUnitsMode ? 'UNITS' : 'LOTS';
+            await logAction(requesterId || trade.user_id, 'CLOSE_TRADE', 'trades',
+                `Closed trade #${trade.id} @ ${finalExitPrice}. PnL: ${pnl.toFixed(2)}, Brokerage: ${brokerage}, Swap: ${swap} [Mode: ${tradeMode}]`);
             
             try {
                 await invalidateCache(`m2m_${trade.user_id}_TRADER`);
