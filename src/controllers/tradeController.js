@@ -1007,12 +1007,8 @@ const placeOrder = async (req, res) => {
             });
         }
 
-        // ✅ MULTIPLY QUANTITY BY LOT SIZE FOR MCX (User enters lots, we store actual units)
+        // Store quantity as entered by user (no lot multiplication)
         let actualQty = qtyNum;
-        if (marketType === 'MCX' && lotSize && lotSize > 1) {
-            actualQty = qtyNum * lotSize;
-            console.log(`[placeOrder] 📦 MCX LOT CONVERSION: ${qtyNum} lots × ${lotSize} = ${actualQty} units`);
-        }
 
         const [result] = await db.execute(
             `INSERT INTO trades
@@ -1663,10 +1659,8 @@ const modifyPendingOrder = async (req, res) => {
                         }
                     }
 
-                    if (lotSize && lotSize > 1) {
-                        qtyToStore = parseInt(qty) * lotSize;
-                        console.log(`[modifyPendingOrder] 📦 MCX LOT CONVERSION: ${qty} lots × ${lotSize} = ${qtyToStore} units`);
-                    }
+                    // Store quantity as entered by user (no lot multiplication)
+                    qtyToStore = parseInt(qty);
                 } catch (e) {
                     console.warn('[modifyPendingOrder] Warning: Could not fetch lotSize, using qty as-is:', e.message);
                 }

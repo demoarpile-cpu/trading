@@ -104,7 +104,7 @@ class TradeService {
             let brokerSwapRate = 5;
 
             // Helper: calculate brokerage based on type
-            const calcBrokerage = (brokerageVal, brokerageType, qty, exitPrice, entryPrice) => {
+            const calcBrokerage = (brokerageVal, brokerageType, qty, exitPrice, entryPrice, multiplier = 1) => {
                 const rate = Math.abs(parseFloat(brokerageVal || 0));
                 if (rate <= 0) return 0;
 
@@ -114,7 +114,7 @@ class TradeService {
                 if (type === 'PER_LOT' || type === 'PER LOT') {
                     result = qty * rate;
                 } else if (type === 'PER_CRORE' || type === 'PER CRORE') {
-                    const turnover = (parseFloat(entryPrice) + parseFloat(exitPrice)) * qty;
+                    const turnover = (parseFloat(entryPrice) + parseFloat(exitPrice)) * qty * multiplier;
                     result = (turnover / 10000000) * rate;
                 } else {
                     result = qty * rate;
@@ -183,7 +183,7 @@ class TradeService {
 
                 if (segmentRows.length > 0 && parseFloat(segmentRows[0].brokerage_value) > 0) {
                     const seg = segmentRows[0];
-                    brokerage = calcBrokerage(seg.brokerage_value, seg.brokerage_type, trade.qty, finalExitPrice, trade.entry_price);
+                    brokerage = calcBrokerage(seg.brokerage_value, seg.brokerage_type, trade.qty, finalExitPrice, trade.entry_price, lotSize);
                     console.log(`[TradeService] Segment ${trade.market_type} Brokerage: Rate=${seg.brokerage_value}, Type=${seg.brokerage_type}, Calculated=${brokerage.toFixed(2)}`);
                 } else {
                     // Priority 3: General Fallback from client_settings
@@ -192,10 +192,10 @@ class TradeService {
                         let rate = parseFloat(clientConfig.mcxBrokerage || 0);
 
                         const calcType = brokerageType === 'per_lot' ? 'PER_LOT' : 'PER_CRORE';
-                        brokerage = calcBrokerage(rate, calcType, trade.qty, finalExitPrice, trade.entry_price);
+                        brokerage = calcBrokerage(rate, calcType, trade.qty, finalExitPrice, trade.entry_price, lotSize);
                     } else if (mType === 'EQUITY') {
                         const rate = parseFloat(clientConfig.brokerEquityBrokerage || clientConfig.equityBrokerage || 0);
-                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price, lotSize);
                     } else if (mType === 'OPTIONS') {
                         let rate = 0;
                         if (cleanSymbol.includes('NIFTY') || cleanSymbol.includes('BANKNIFTY')) {
@@ -208,13 +208,13 @@ class TradeService {
                         brokerage = trade.qty * rate;
                     } else if (mType === 'COMEX') {
                         const rate = parseFloat(clientConfig.comexBrokerage || 0);
-                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price, lotSize);
                     } else if (mType === 'FOREX') {
                         const rate = parseFloat(clientConfig.forexBrokerage || 0);
-                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price, lotSize);
                     } else if (mType === 'CRYPTO') {
                         const rate = parseFloat(clientConfig.cryptoBrokerage || 0);
-                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price, lotSize);
                     }
                     
                     if (brokerage > 0) {
