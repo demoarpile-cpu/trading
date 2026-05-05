@@ -288,6 +288,20 @@ const placeOrder = async (req, res) => {
             }
 
             console.log(`[placeOrder] ✅ Lot size valid: Min=${minLot}, Max=${maxLot}, Qty=${qtyNum}`);
+
+            // ─── INSTRUMENT-SPECIFIC LOT SIZE VALIDATION ─────────────────────
+            // Check if qty exceeds the instrument's LOT value from mcxLotMargins
+            // Example: If GOLD has LOT=5, user can only place max 5 lots at a time
+            const baseSym = sym.toUpperCase();
+            const instrumentLotSize = parseInt(clientConfig?.mcxLotMargins?.[baseSym]?.LOT || 1);
+
+            if (qtyNum > instrumentLotSize) {
+                return res.status(400).json({
+                    message: `Maximum lot size for ${symbol} is ${instrumentLotSize}. You tried to place ${qtyNum} lots. Only ${instrumentLotSize} lot(s) allowed per trade.`
+                });
+            }
+
+            console.log(`[placeOrder] ✅ Instrument lot validation: ${symbol} LOT=${instrumentLotSize}, Qty=${qtyNum}`);
         }
 
         // EQUITY lot size validation
