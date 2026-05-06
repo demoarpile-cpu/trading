@@ -117,6 +117,7 @@ class MarketDataService extends EventEmitter {
         this.broadcastTimer = setInterval(() => {
             if (this.dirtySymbols.size === 0) return;
 
+            console.log(`[MarketDataService] 📡 Broadcasting ${this.dirtySymbols.size} dirty symbols`);
 
             const updates = {};
             this.dirtySymbols.forEach(sym => {
@@ -128,6 +129,7 @@ class MarketDataService extends EventEmitter {
                     if (ltp > 0) {
                         // Extract symbol without prefix (CRYPTO:BTC/USD → BTC/USD, MCX:GOLD → GOLD)
                         const cleanSymbol = sym.includes(':') ? sym.split(':')[1] : sym;
+                        console.log(`[MarketDataService] 🎯 Passing to alert monitor: "${sym}" → "${cleanSymbol}" @ ₹${ltp}`);
                         alertMonitor.checkAlerts(cleanSymbol, ltp);
                     }
                 }
@@ -165,6 +167,7 @@ class MarketDataService extends EventEmitter {
             const userSession = await repo.getSessionByUserId(userId);
 
             if (!userSession || !userSession.access_token) {
+                console.warn('⚠️ No valid Zerodha session found for user - using mock engine');
                 this.isConnecting = false;
                 return;
             }
@@ -243,6 +246,9 @@ class MarketDataService extends EventEmitter {
             this.ticker = null;
         } finally {
             this.isConnecting = false;
+            if (this.ticker === null || !this.ticker?.connected) {
+                console.log('ℹ️ Zerodha unavailable - will use mock engine for market data');
+            }
         }
     }
 
@@ -272,6 +278,7 @@ class MarketDataService extends EventEmitter {
 
             // Log MCX prices for debugging
             if (symbol && symbol.toUpperCase().includes('MCX') || symbol.toUpperCase().includes('GOLD')) {
+                console.log(`[KITE] 📈 MCX Update: ${symbol} = ₹${data.ltp}`);
             }
 
             this.prices[symbol] = data;

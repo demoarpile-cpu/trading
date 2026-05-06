@@ -1024,18 +1024,6 @@ const placeOrder = async (req, res) => {
         // Store quantity as entered by user (no lot multiplication)
         let actualQty = qtyNum;
 
-        // Check if this is EQUITY and user has trade_equity_units enabled
-        // If so, qty is already in units mode (no lot size interpretation)
-        const isEquityUnitsMode = (marketType === 'EQUITY') &&
-                                  (clientConfig?.trade_equity_units === 1 ||
-                                   clientConfig?.trade_equity_units === true);
-
-        if (isEquityUnitsMode) {
-            console.log(`[placeOrder] ✅ EQUITY Units Mode: Qty=${actualQty} (stored as units, not lots)`);
-        } else if (marketType === 'EQUITY') {
-            console.log(`[placeOrder] ✅ EQUITY Lots Mode: Qty=${actualQty} (stored as lots, lot_size=${lotSize})`);
-        }
-
         const [result] = await db.execute(
             `INSERT INTO trades
                 (user_id, symbol, type, order_type, qty, entry_price, exit_price, margin_used, is_pending, market_type, status, trade_ip, created_by, trade_type, margin_type, entry_time)
@@ -1200,6 +1188,7 @@ const getTrades = async (req, res) => {
             }
         }
 
+        console.log('[getTrades] Results:', rows.length, 'trades found for user:', req.user.id);
         res.json(rows);
     } catch (err) {
         console.error(err);
