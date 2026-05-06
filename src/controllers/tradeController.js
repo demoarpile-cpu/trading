@@ -418,24 +418,7 @@ const placeOrder = async (req, res) => {
             }
         }
 
-        if (marketType === 'EQUITY') {
-            const segmentLimit = parseInt(clientConfig.equitySegmentLimit || 0);
-            if (segmentLimit > 0) {
-                const [segmentValue] = await db.execute(
-                    'SELECT COALESCE(SUM(entry_price * qty), 0) as total_value FROM trades WHERE user_id = ? AND status = "OPEN" AND market_type = "EQUITY"',
-                    [targetUserId]
-                );
-                const currentValue = parseFloat(segmentValue[0]?.total_value || 0);
-                const newTradeValue = executionPrice * qtyNum;
-                const newTotal = currentValue + newTradeValue;
 
-                if (newTotal > segmentLimit) {
-                    return res.status(400).json({
-                        message: `EQUITY segment limit is ₹${segmentLimit.toFixed(2)}. Current value: ₹${currentValue.toFixed(2)}, New trade: ₹${newTradeValue.toFixed(2)}, Total would be: ₹${newTotal.toFixed(2)}`
-                    });
-                }
-            }
-        }
 
         // ─── ALLOW FRESH ENTRY CHECK (TIER 2) ───────────────────────────────
         // If allowFreshEntry is disabled, block new entries when losses exceed threshold
