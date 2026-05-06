@@ -145,8 +145,27 @@ const placeOrder = async (req, res) => {
 
         // ─── PARSE QUANTITY AND PRICE EARLY (needed for validations) ──────────────
         const qtyNum = parseInt(qty, 10);
-        const currentPrice = mockEngine.getPrice(symbol);
-        const executionPrice = price ? parseFloat(price) : (order_type === 'MARKET' ? currentPrice : 0);
+        
+        // Robust Live Price Fetcher (prioritize MarketDataService, then Kite API)
+        let liveMarketPrice = null;
+        const marketDataService = require('../services/MarketDataService');
+        const liveData = marketDataService.getPrice(symbol) || marketDataService.getPrice(`MCX:${symbol}`);
+        
+        if (liveData && liveData.ltp) {
+            liveMarketPrice = liveData.ltp;
+        } else if (require('../utils/kiteService').isAuthenticated()) {
+            try {
+                const quote = await require('../utils/kiteService').getQuote(symbol.includes(':') ? symbol : `MCX:${symbol}`);
+                liveMarketPrice = quote[Object.keys(quote)[0]]?.last_price;
+            } catch (_) {}
+        }
+        
+        if (!liveMarketPrice) {
+            liveMarketPrice = mockEngine.getPrice(symbol);
+            console.log(`[placeOrder] ℹ️ Live price unavailable, using Mock Engine: ${liveMarketPrice}`);
+        }
+
+        const executionPrice = price ? parseFloat(price) : (order_type === 'MARKET' ? liveMarketPrice : 0);
         let marginRequired = 0;
 
         // Validate parsed values
@@ -1171,7 +1190,7 @@ const getTrades = async (req, res) => {
             }
         }
 
-        console.log('[getTrades] Results:', rows.length, 'trades found for user:', req.user.id);
+
         res.json(rows);
     } catch (err) {
         console.error(err);

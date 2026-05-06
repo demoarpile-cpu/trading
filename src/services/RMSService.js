@@ -68,7 +68,7 @@ class RMSService {
                 const liveData = marketDataService.getPrice(trade.symbol);
                 if (!liveData) continue;
 
-                const currentPrice = liveData.ltp;
+                const currentPrice = trade.type === 'BUY' ? (liveData.bid || liveData.ltp) : (liveData.ask || liveData.ltp);
                 const pnl = trade.type === 'BUY'
                     ? (currentPrice - trade.entry_price) * trade.qty
                     : (trade.entry_price - currentPrice) * trade.qty;

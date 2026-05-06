@@ -119,8 +119,7 @@ const autoCloseTrade = async (trade, exitPrice, reason) => {
 
         // Close the trade
         await db.execute(
-            `UPDATE trades SET status = 'CLOSED', exit_price = ?, pnl = ?, exit_time = NOW(),
-             created_by = NULL WHERE id = ?`,
+            `UPDATE trades SET status = 'CLOSED', exit_price = ?, pnl = ?, exit_time = NOW(), closed_by = 'ADMIN' WHERE id = ?`,
             [exitPrice, pnl, trade.id]
         );
 

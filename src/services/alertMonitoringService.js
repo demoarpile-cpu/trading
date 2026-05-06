@@ -28,7 +28,7 @@ const monitorPriceAlerts = async () => {
 
         if (alerts.length === 0) return;
 
-        console.log(`[AlertMonitor] 📊 Checking ${alerts.length} active alert(s) for price hits...`);
+
 
         // Process up to 50 alerts per cycle to prevent overwhelming the DB
         const alertsToProcess = alerts.slice(0, 50);
@@ -62,12 +62,11 @@ const monitorPriceAlerts = async () => {
                     const priceData = marketDataService.getPrice(pattern);
                     if (priceData && priceData.ltp) {
                         currentPrice = priceData.ltp;
-                        console.log(`[AlertMonitor] ✅ Pattern match found: "${pattern}" → ₹${currentPrice}`);
+
                         break;
                     }
                 }
                 if (!currentPrice) {
-                    console.log(`[AlertMonitor] 📌 Alert: ${alert.symbol}, No pattern matched. Trying fuzzy match...`);
                 }
 
                 // Fuzzy match: scan all live prices for a key that starts with base symbol
@@ -80,7 +79,7 @@ const monitorPriceAlerts = async () => {
                             const priceData = allPrices[key];
                             if (priceData && priceData.ltp) {
                                 currentPrice = priceData.ltp;
-                                console.log(`[AlertMonitor] 🔍 Fuzzy match: "${alert.symbol}" → "${key}" @ ₹${currentPrice}`);
+
                                 break;
                             }
                         }
@@ -98,16 +97,12 @@ const monitorPriceAlerts = async () => {
 
                 // Skip if no price available
                 if (!currentPrice || currentPrice === undefined) {
-                    console.log(`[AlertMonitor] ⚠️  NO PRICE found for alert: ${alert.symbol} (ID#${alert.id})`);
                     continue;
                 }
 
                 const targetPrice = parseFloat(alert.target_price);
                 const ltpAsNumber = parseFloat(currentPrice); // ✅ Ensure price is a number
                 let triggered = false;
-
-                // ✅ Debug log comparison
-                console.log(`[AlertMonitor] 📊 Comparing: LTP=${ltpAsNumber} vs Target=${targetPrice} (type: ${alert.type})`);
 
                 // Check if alert target is hit
                 if (alert.type === 'above' && ltpAsNumber >= targetPrice) {
@@ -117,12 +112,6 @@ const monitorPriceAlerts = async () => {
                 }
 
                 if (triggered) {
-                    console.log(`\n✅ [AlertMonitor] TRIGGERED!!!`);
-                    console.log(`   Symbol: ${alert.symbol} (ID#${alert.id})`);
-                    console.log(`   LTP=₹${ltpAsNumber} vs Target=₹${targetPrice}`);
-                    console.log(`   Type: ${alert.type}`);
-                    console.log(`   User: #${alert.user_id}\n`);
-
                     // Update alert status - with minimal logging
                     await db.execute(
                         'UPDATE alerts SET status = ?, triggered_at = NOW() WHERE id = ?',
@@ -160,7 +149,6 @@ const startAlertMonitoring = () => {
     setInterval(() => {
         // Skip if already monitoring (prevent concurrent requests)
         if (isMonitoring) {
-            console.log('[AlertMonitor] ⏳ Still monitoring from previous cycle, skipping...');
             return;
         }
 

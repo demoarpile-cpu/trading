@@ -117,7 +117,7 @@ class MarketDataService extends EventEmitter {
         this.broadcastTimer = setInterval(() => {
             if (this.dirtySymbols.size === 0) return;
 
-            console.log(`[MarketDataService] 📡 Broadcasting ${this.dirtySymbols.size} dirty symbols`);
+
 
             const updates = {};
             this.dirtySymbols.forEach(sym => {
@@ -127,9 +127,7 @@ class MarketDataService extends EventEmitter {
                     // ✅ CHECK PRICE ALERTS FOR THIS SYMBOL
                     const ltp = this.prices[sym].ltp || this.prices[sym].price || 0;
                     if (ltp > 0) {
-                        // Extract symbol without prefix (CRYPTO:BTC/USD → BTC/USD, MCX:GOLD → GOLD)
                         const cleanSymbol = sym.includes(':') ? sym.split(':')[1] : sym;
-                        console.log(`[MarketDataService] 🎯 Passing to alert monitor: "${sym}" → "${cleanSymbol}" @ ₹${ltp}`);
                         alertMonitor.checkAlerts(cleanSymbol, ltp);
                     }
                 }
@@ -184,6 +182,21 @@ class MarketDataService extends EventEmitter {
             this.ticker.on('connect', () => {
                 console.log('✅ Zerodha Ticker Connected');
                 this.resubscribe();
+
+                // Always subscribe NSE Indices (hardcoded Zerodha tokens)
+                const INDEX_TOKENS = [
+                    { token: 256265, symbol: 'NSE:NIFTY 50' },
+                    { token: 260105, symbol: 'NSE:NIFTY BANK' },
+                    { token: 257801, symbol: 'NSE:NIFTY FIN SERVICE' },
+                ];
+                const indexTokenNums = INDEX_TOKENS.map(i => i.token);
+                INDEX_TOKENS.forEach(i => {
+                    this.instrumentMap[String(i.token)] = i.symbol;
+                    this.subscribedTokens.add(String(i.token));
+                });
+                this.ticker.subscribe(indexTokenNums);
+                this.ticker.setMode(this.ticker.modeFull, indexTokenNums);
+                console.log('📊 Subscribed to NSE Indices: NIFTY 50, BANK NIFTY, FINNIFTY');
             });
 
             this.ticker.on('ticks', (ticks) => {
@@ -253,6 +266,9 @@ class MarketDataService extends EventEmitter {
     }
 
     handleTicks(ticks) {
+        // Index symbols that don't have order book depth
+        const INDEX_SYMBOLS = new Set(['NSE:NIFTY 50', 'NSE:NIFTY BANK', 'NSE:NIFTY FIN SERVICE']);
+
         ticks.forEach(tick => {
             const token = String(tick.instrument_token);
             const symbol = this.instrumentMap[token] || token;
@@ -263,23 +279,22 @@ class MarketDataService extends EventEmitter {
             const hasBid = buy0 != null && Number.isFinite(Number(buy0));
             const hasAsk = sell0 != null && Number.isFinite(Number(sell0));
 
+            const ltp = tick.last_price != null ? tick.last_price : prev.ltp;
+            const isIndex = INDEX_SYMBOLS.has(symbol);
+
             const data = {
                 ...prev,
                 symbol,
-                ltp: tick.last_price != null ? tick.last_price : prev.ltp,
-                bid: hasBid ? Number(buy0) : prev.bid,
-                ask: hasAsk ? Number(sell0) : prev.ask,
+                ltp,
+                // For indices: no order book, so bid = ask = ltp
+                bid: hasBid ? Number(buy0) : (isIndex ? ltp : (prev.bid || 0)),
+                ask: hasAsk ? Number(sell0) : (isIndex ? ltp : (prev.ask || 0)),
                 change: tick.net_change != null ? tick.net_change : prev.change,
                 volume: tick.volume_traded != null ? tick.volume_traded : prev.volume,
                 ohlc: tick.ohlc && Object.keys(tick.ohlc).length ? tick.ohlc : (prev.ohlc || {}),
                 depth: tick.depth && (tick.depth.buy?.length || tick.depth.sell?.length) ? tick.depth : (prev.depth || {}),
                 type: (symbol.startsWith('NSE') || symbol.startsWith('NFO') || symbol.startsWith('MCX')) ? symbol.split(':')[0] : (prev.type || 'NSE')
             };
-
-            // Log MCX prices for debugging
-            if (symbol && symbol.toUpperCase().includes('MCX') || symbol.toUpperCase().includes('GOLD')) {
-                console.log(`[KITE] 📈 MCX Update: ${symbol} = ₹${data.ltp}`);
-            }
 
             this.prices[symbol] = data;
             this.dirtySymbols.add(symbol);

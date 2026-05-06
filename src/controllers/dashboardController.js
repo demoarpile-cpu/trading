@@ -298,15 +298,51 @@ const getMarketWatch = async (req, res) => {
 
 const getIndices = async (req, res) => {
     try {
-        const nifty = marketDataService.getPrice('NSE:NIFTY 50') || { ltp: 0, change: 0, chg_pct: 0 };
-        const banknifty = marketDataService.getPrice('NSE:NIFTY BANK') || { ltp: 0, change: 0, chg_pct: 0 };
+        // Step 1: Try WebSocket prices (live, when market open)
+        let nifty     = marketDataService.getPrice('NSE:NIFTY 50')          || {};
+        let banknifty = marketDataService.getPrice('NSE:NIFTY BANK')         || {};
+        let finnifty  = marketDataService.getPrice('NSE:NIFTY FIN SERVICE')  || {};
 
-        const indices = [
-            { name: 'NIFTY 50', ltp: nifty.ltp, change: nifty.change, pct: nifty.chg_pct },
-            { name: 'BANK NIFTY', ltp: banknifty.ltp, change: banknifty.change, pct: banknifty.chg_pct }
-        ];
+        // Step 2: If WebSocket has no data (market closed), fallback to Kite REST API
+        // Kite REST returns last known closing price even when market is closed
+        if (!nifty.ltp && !banknifty.ltp && !finnifty.ltp) {
+            try {
+                const kiteService = require('../utils/kiteService');
+                if (kiteService.isAuthenticated()) {
+                    const instruments = ['NSE:NIFTY 50', 'NSE:NIFTY BANK', 'NSE:NIFTY FIN SERVICE'];
+                    const quotes = await kiteService.getKite().getLTP(instruments);
+                    if (quotes) {
+                        if (quotes['NSE:NIFTY 50'])          nifty     = { ltp: quotes['NSE:NIFTY 50'].last_price };
+                        if (quotes['NSE:NIFTY BANK'])        banknifty = { ltp: quotes['NSE:NIFTY BANK'].last_price };
+                        if (quotes['NSE:NIFTY FIN SERVICE']) finnifty  = { ltp: quotes['NSE:NIFTY FIN SERVICE'].last_price };
+                    }
+                }
+            } catch (restErr) {
+                console.warn('⚠️ Indices REST fallback failed:', restErr.message);
+            }
+        }
 
-        res.json(indices);
+        const toIndex = (raw, name) => {
+            const ltp = raw.ltp || 0;
+            return {
+                name,
+                ltp,
+                bid: raw.bid || ltp,
+                ask: raw.ask || ltp,
+                change: raw.change || 0,
+                pct: raw.chg_pct || 0,
+                high: raw.ohlc?.high || 0,
+                low:  raw.ohlc?.low  || 0,
+                open: raw.ohlc?.open || 0,
+                close: raw.ohlc?.close || 0,
+            };
+        };
+
+        res.json([
+            toIndex(nifty,     'NIFTY 50'),
+            toIndex(banknifty, 'BANK NIFTY'),
+            toIndex(finnifty,  'FINNIFTY'),
+        ]);
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');

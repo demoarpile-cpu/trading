@@ -78,11 +78,18 @@ class TradeService {
                 }
             }
 
-            let finalExitPrice = exitPrice || trade.entry_price;
+            let finalExitPrice = exitPrice;
             if (!finalExitPrice || finalExitPrice <= 0) {
                 const { getMcxBaseScrip } = require('../utils/symbolHelper');
                 const cleanSymbol = getMcxBaseScrip(trade.symbol);
-                finalExitPrice = mockEngine.getPrice(cleanSymbol) || trade.entry_price;
+                const marketDataService = require('./MarketDataService');
+                const liveData = marketDataService.getPrice(trade.symbol) || marketDataService.getPrice(`MCX:${trade.symbol}`);
+                
+                if (liveData) {
+                    finalExitPrice = trade.type === 'BUY' ? (liveData.bid || liveData.ltp) : (liveData.ask || liveData.ltp);
+                } else {
+                    finalExitPrice = mockEngine.getPrice(cleanSymbol) || trade.entry_price;
+                }
             }
 
             // Use provided P/L from frontend if available (calculated at the moment of exit)
@@ -238,9 +245,19 @@ class TradeService {
             // 5. Update Database
             const balanceChange = pnl - brokerage - swap;
 
+            let closedByRole = 'TRADER';
+            if (requesterId === 0) {
+                closedByRole = 'ADMIN';
+            } else {
+                const [reqUserRows] = await connection.execute('SELECT role FROM users WHERE id = ?', [requesterId]);
+                if (reqUserRows.length > 0 && reqUserRows[0].role !== 'TRADER') {
+                    closedByRole = 'ADMIN';
+                }
+            }
+
             await connection.execute(
-                'UPDATE trades SET status = "CLOSED", exit_price = ?, exit_time = NOW(), pnl = ?, brokerage = ?, swap = ? WHERE id = ?',
-                [finalExitPrice, pnl, brokerage, swap, tradeId]
+                'UPDATE trades SET status = "CLOSED", exit_price = ?, exit_time = NOW(), pnl = ?, brokerage = ?, swap = ?, closed_by = ? WHERE id = ?',
+                [finalExitPrice, pnl, brokerage, swap, closedByRole, tradeId]
             );
 
             await connection.execute(

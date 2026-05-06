@@ -1,15 +1,33 @@
 const cron = require('node-cron');
 const db = require('../config/db');
 const { getMcxBaseScrip } = require('../utils/symbolHelper');
+const marketDataService = require('./MarketDataService');
+const kiteService = require('../utils/kiteService');
 
 /**
- * Runs every minute — checks if it's the configured square-off time
- * If holding margin > balance for a trade, force-closes it
+ * Helper to calculate brokerage based on type
  */
+const calcBrokerage = (brokerageVal, brokerageType, qty, exitPrice, entryPrice, multiplier = 1) => {
+    const rate = Math.abs(parseFloat(brokerageVal || 0));
+    if (rate <= 0) return 0;
+
+    const type = (brokerageType || 'PER_LOT').toUpperCase();
+    let result = 0;
+
+    if (type === 'PER_LOT' || type === 'PER LOT') {
+        result = qty * rate;
+    } else if (type === 'PER_CRORE' || type === 'PER CRORE') {
+        const turnover = (parseFloat(entryPrice) + parseFloat(exitPrice)) * qty * multiplier;
+        result = (turnover / 10000000) * rate;
+    } else {
+        result = qty * rate;
+    }
+    return Math.max(0, result);
+};
+
 const startExpirySquareOffJob = () => {
     cron.schedule('* * * * *', async () => {
         try {
-            // 1. Fetch all expiry rules
             const [rules] = await db.execute('SELECT * FROM expiry_rules');
             if (!rules.length) return;
 
@@ -17,7 +35,6 @@ const startExpirySquareOffJob = () => {
             const currentH = now.getHours();
             const currentM = now.getMinutes();
 
-            // Cache all users to build hierarchy efficiently
             const [allUsers] = await db.execute('SELECT id, parent_id FROM users');
 
             for (const rule of rules) {
@@ -26,9 +43,8 @@ const startExpirySquareOffJob = () => {
                 const [hh, mm] = (rule.square_off_time || '11:30').split(':');
                 if (parseInt(hh) !== currentH || parseInt(mm) !== currentM) continue;
 
-                console.log(`[ExpirySquareOff] 🕒 Square-off reached for Admin #${rule.user_id} (${hh}:${mm})`);
+                console.log(`[ExpirySquareOff] 🕒 Square-off reached for Admin #${rule.user_id}`);
 
-                // 2. Find all traders under this Admin/Superadmin
                 const descendantIds = [];
                 const queue = [rule.user_id];
                 const processed = new Set();
@@ -43,27 +59,8 @@ const startExpirySquareOffJob = () => {
 
                 if (!descendantIds.length) continue;
 
-                // ─── 3. CANCEL PENDING ORDERS FOR THESE TRADERS ─────────────────────────
-                const [pendingOrders] = await db.execute(
-                    `SELECT id, user_id, margin_used FROM trades 
-                     WHERE status = "OPEN" AND is_pending = 1 AND user_id IN (${descendantIds.join(',')})`
-                );
-
-                if (pendingOrders.length > 0) {
-                    console.log(`[ExpirySquareOff] Admin #${rule.user_id}: Cancelling ${pendingOrders.length} pending orders...`);
-                    for (const order of pendingOrders) {
-                        try {
-                            await db.execute('UPDATE trades SET status = "CANCELLED", exit_time = NOW(), pnl = 0 WHERE id = ?', [order.id]);
-                        } catch (err) {
-                            console.error(`[ExpirySquareOff] Failed to cancel pending order #${order.id}:`, err.message);
-                        }
-                    }
-                }
-
-                // ─── 4. CHECK HOLDING MARGIN FOR ALL OPEN TRADES ─────────────────────────
                 const [allOpenTrades] = await db.execute(
-                    `SELECT t.id, t.user_id, t.symbol, t.type, t.qty, t.entry_price, t.market_type,
-                            u.balance, cs.config_json
+                    `SELECT t.*, u.balance, cs.config_json
                      FROM trades t
                      JOIN users u ON t.user_id = u.id
                      JOIN client_settings cs ON t.user_id = cs.user_id
@@ -72,57 +69,85 @@ const startExpirySquareOffJob = () => {
                      AND t.market_type = 'MCX'`
                 );
 
-                if (allOpenTrades.length > 0) {
-                    const mockEngine = require('../utils/mockEngine');
-                    let closedCount = 0;
+                for (const trade of allOpenTrades) {
+                    try {
+                        const userBalance = parseFloat(trade.balance || 0);
+                        let userConfig = {};
+                        try { userConfig = JSON.parse(trade.config_json || '{}'); } catch (e) {}
 
-                    for (const trade of allOpenTrades) {
-                        try {
-                            const userBalance = parseFloat(trade.balance || 0);
-                            let userConfig = {};
-                            try { userConfig = JSON.parse(trade.config_json || '{}'); } catch (e) {}
+                        const base = getMcxBaseScrip(trade.symbol);
+                        const defaultHolding = 1000000;
+                        let holdingExposure = parseFloat(userConfig?.mcxHoldingMargin || defaultHolding);
 
-                            // Calculate holding margin for this trade
-                            const base = getMcxBaseScrip(trade.symbol);
-                            const defaultHolding = 1000000; // Default for MCX
-                            let holdingExposure = parseFloat(userConfig?.mcxHoldingMargin || defaultHolding);
+                        if (userConfig?.mcxLotMargins) {
+                            if (userConfig.mcxLotMargins[base]?.HOLDING) holdingExposure = parseFloat(userConfig.mcxLotMargins[base].HOLDING);
+                        }
 
-                            // Try to get per-instrument holding margin from config
-                            if (userConfig?.mcxLotMargins) {
-                                if (userConfig.mcxLotMargins[base]?.HOLDING) {
-                                    holdingExposure = parseFloat(userConfig.mcxLotMargins[base].HOLDING);
-                                } else if (userConfig.mcxLotMargins[`MCX:${base}`]?.HOLDING) {
-                                    holdingExposure = parseFloat(userConfig.mcxLotMargins[`MCX:${base}`].HOLDING);
-                                } else if (userConfig.mcxLotMargins[trade.symbol]?.HOLDING) {
-                                    holdingExposure = parseFloat(userConfig.mcxLotMargins[trade.symbol].HOLDING);
+                        const holdingMarginRequired = holdingExposure * trade.qty;
+
+                        if (userBalance < holdingMarginRequired) {
+                            let exitPrice = null;
+                            const searchPatterns = [trade.symbol, `MCX:${trade.symbol}`];
+
+                            for (const pattern of searchPatterns) {
+                                const liveData = marketDataService.getPrice(pattern);
+                                if (liveData) {
+                                    exitPrice = trade.type === 'BUY' ? (liveData.bid || liveData.ltp) : (liveData.ask || liveData.ltp);
+                                    if (exitPrice && exitPrice > 0) break;
                                 }
                             }
 
-                            const holdingMarginRequired = holdingExposure * trade.qty;
-
-                            // Check if balance < holding margin required
-                            if (userBalance < holdingMarginRequired) {
-                                console.log(`[ExpirySquareOff] 🚨 Holding Margin Check Failed: User #${trade.user_id}, Trade #${trade.id} (${trade.symbol}), Balance=${userBalance}, Required=${holdingMarginRequired}`);
-
-                                // Close at entry price (break-even) since this is a margin-based force closure, not price-based
-                                const exitPrice = trade.entry_price;
-                                const pnl = 0;
-
-                                // Close the trade
-                                await db.execute(
-                                    `UPDATE trades SET status = 'CLOSED', exit_price = ?, pnl = ?, exit_time = NOW() WHERE id = ?`,
-                                    [exitPrice, pnl, trade.id]
-                                );
-                                await db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', [pnl, trade.user_id]);
-                                closedCount++;
+                            if (!exitPrice && kiteService.isAuthenticated()) {
+                                try {
+                                    const kiteSym = trade.symbol.includes(':') ? trade.symbol : `MCX:${trade.symbol}`;
+                                    const quoteRes = await kiteService.getQuote(kiteSym);
+                                    const quote = quoteRes[kiteSym] || Object.values(quoteRes)[0];
+                                    if (quote) exitPrice = trade.type === 'BUY' ? (quote.depth?.buy?.[0]?.price || quote.last_price) : (quote.depth?.sell?.[0]?.price || quote.last_price);
+                                } catch (_) {}
                             }
-                        } catch (err) {
-                            console.error(`[ExpirySquareOff] Failed to process trade #${trade.id}:`, err.message);
-                        }
-                    }
 
-                    if (closedCount > 0) {
-                        console.log(`[ExpirySquareOff] ✅ Admin #${rule.user_id}: Closed ${closedCount} trades due to holding margin violation`);
+                            if (!exitPrice || exitPrice <= 0) {
+                                const mockEngine = require('../utils/mockEngine');
+                                exitPrice = mockEngine.getPrice(base) || trade.entry_price;
+                            }
+
+                            const INSTRUMENT_META = {
+                                'CRUDEOIL': 100, 'NATURALGAS': 1250, 'GOLD': 100, 'GOLDM': 10,
+                                'SILVER': 30, 'SILVERM': 5, 'COPPER': 2500, 'ZINC': 5000,
+                                'NICKEL': 1500, 'LEAD': 5000, 'ALUMINIUM': 5000, 'MENTHAOIL': 360,
+                                'COTTON': 25, 'BULLDEX': 1, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
+                                'ZINCMINI': 1000, 'LEADMINI': 1000, 'NICKELMINI': 100, 'ALUMINI': 1000,
+                                'CRUDEOILM': 10, 'NATGASMINI': 250, 'SILVERMIC': 1
+                            };
+                            const multiplier = INSTRUMENT_META[base] || 1;
+
+                            const pnl = trade.type === 'BUY'
+                                ? (exitPrice - trade.entry_price) * trade.qty * multiplier
+                                : (trade.entry_price - exitPrice) * trade.qty * multiplier;
+
+                            // ─── BROKERAGE CALCULATION ───
+                            let brokerage = 0;
+                            const bType = (userConfig.mcxBrokerageType || 'per_crore').toLowerCase();
+                            if (bType === 'per_lot') {
+                                const lotBrokerageMap = { ...userConfig.brokerMcxBrokerage, ...userConfig.mcxLotBrokerage };
+                                const rate = parseFloat(lotBrokerageMap[base] || lotBrokerageMap[trade.symbol] || userConfig.mcxLotBrokerageDefault || 0);
+                                brokerage = trade.qty * rate;
+                            } else {
+                                const rate = parseFloat(userConfig.mcxBrokerage || 0);
+                                const turnover = (parseFloat(trade.entry_price) + parseFloat(exitPrice)) * trade.qty * multiplier;
+                                brokerage = (turnover / 10000000) * rate;
+                            }
+
+                            const balanceChange = pnl - brokerage;
+
+                            await db.execute(
+                                `UPDATE trades SET status = 'CLOSED', exit_price = ?, pnl = ?, brokerage = ?, exit_time = NOW(), closed_by = 'ADMIN' WHERE id = ?`,
+                                [exitPrice, pnl, brokerage, trade.id]
+                            );
+                            await db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', [balanceChange, trade.user_id]);
+                        }
+                    } catch (err) {
+                        console.error(`[ExpirySquareOff] Error trade #${trade.id}:`, err.message);
                     }
                 }
             }
@@ -130,8 +155,6 @@ const startExpirySquareOffJob = () => {
             console.error('[ExpirySquareOff] Cron error:', err.message);
         }
     });
-
-    console.log('[ExpirySquareOff] Per-admin square-off cron job started');
 };
 
 module.exports = { startExpirySquareOffJob };

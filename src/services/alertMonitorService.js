@@ -30,7 +30,7 @@ class AlertMonitor {
         try {
             // ✅ Normalize symbol for matching (remove spaces, standardize)
             const cleanSymbol = symbol.toUpperCase().trim().replace(/\s+/g, '');
-            console.log(`[AlertMonitor] 🔍 Checking symbol: "${symbol}" (cleaned: "${cleanSymbol}") @ LTP ₹${ltp}`);
+
 
             // Fetch ALL active alerts and do fuzzy matching
             const [allAlerts] = await db.execute(
@@ -39,9 +39,8 @@ class AlertMonitor {
                  WHERE status = 'active'`
             );
 
-            console.log(`[AlertMonitor] 📊 Total active alerts in database: ${allAlerts.length}`);
             if (allAlerts.length > 0) {
-                console.log(`[AlertMonitor] Alert symbols: ${allAlerts.map(a => a.symbol).join(', ')}`);
+                // Do nothing
             }
 
             // ✅ Filter alerts that match this symbol (fuzzy match with base symbol support)
@@ -64,7 +63,7 @@ class AlertMonitor {
                 }
 
                 if (isMatch) {
-                    console.log(`[AlertMonitor] ✅ MATCH: "${alert.symbol}" (cleaned: "${alertCleanSymbol}") matches incoming "${cleanSymbol}"`);
+                    // console.log(`[AlertMonitor] ✅ MATCH...`);
                 }
                 return isMatch;
             });
@@ -72,12 +71,9 @@ class AlertMonitor {
             const alerts = matchingAlerts;
 
             if (!alerts || alerts.length === 0) {
-                // No alerts found - log for debugging
-                console.log(`[AlertMonitor] ❌ No active alerts found for ${symbol} (cleaned: ${cleanSymbol})`);
+                // No alerts found
                 return;
             }
-
-            console.log(`[AlertMonitor] ✅ Checking ${alerts.length} alert(s) for ${symbol} @ LTP ₹${ltp}`);
 
             // Check each alert
             for (const alert of alerts) {
@@ -85,9 +81,6 @@ class AlertMonitor {
                 const ltpAsNumber = parseFloat(ltp); // ✅ Ensure LTP is also a number
                 let shouldTrigger = false;
                 let triggerReason = '';
-
-                // ✅ Debug log comparison
-                console.log(`[AlertMonitor] 📊 Comparing: LTP=${ltpAsNumber} vs Target=${targetPrice} (type: ${alert.type})`);
 
                 // Check condition
                 if (alert.type === 'above' && ltpAsNumber >= targetPrice) {
@@ -126,12 +119,9 @@ class AlertMonitor {
                         console.log(`📢 Notification sent to user #${alert.user_id} for alert #${alert.id}`);
                     }
                 } else if (shouldTrigger && this.triggeredAlerts.has(alert.id)) {
-                    // Already triggered, log for debugging
-                    console.log(`[AlertMonitor] ℹ️ Alert #${alert.id} already triggered`);
+                    // Already triggered
                 } else {
                     // Condition not met yet
-                    const checkStr = alert.type === 'above' ? `${ltp} >= ${targetPrice}` : `${ltp} <= ${targetPrice}`;
-                    console.log(`[AlertMonitor] ⏳ Alert #${alert.id}: ${checkStr}? NO`);
                 }
             }
         } catch (err) {
