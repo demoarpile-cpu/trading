@@ -3,6 +3,7 @@ const db = require('../config/db');
 const { getMcxBaseScrip } = require('../utils/symbolHelper');
 const marketDataService = require('./MarketDataService');
 const kiteService = require('../utils/kiteService');
+const tradeService = require('./TradeService');
 
 /**
  * Runs every minute — checks if it's the configured square-off time (Rollover Time)
@@ -68,28 +69,6 @@ const startRolloverMarginJob = () => {
                         const userConfig = JSON.parse(trade.config_json || '{}');
                         let totalHoldingRequired = 0;
                         const base = getMcxBaseScrip(trade.symbol);
-                        const multiplier = INSTRUMENT_META[base] || 1;
-
-                        // 🎯 Live Price Detection
-                        let currentPrice = null;
-                        const liveData = marketDataService.getPrice(trade.symbol) || marketDataService.getPrice(`MCX:${trade.symbol}`);
-                        if (liveData) {
-                            currentPrice = trade.type === 'BUY' ? (liveData.bid || liveData.ltp) : (liveData.ask || liveData.ltp);
-                        }
-                        
-                        if (!currentPrice && kiteService.isAuthenticated()) {
-                            try {
-                                const kiteSym = trade.symbol.includes(':') ? trade.symbol : `MCX:${trade.symbol}`;
-                                const q = await kiteService.getQuote(kiteSym);
-                                const quote = q[kiteSym] || Object.values(q)[0];
-                                if (quote) currentPrice = trade.type === 'BUY' ? (quote.depth?.buy?.[0]?.price || quote.last_price) : (quote.depth?.sell?.[0]?.price || quote.last_price);
-                            } catch (_) {}
-                        }
-
-                        if (!currentPrice) {
-                            const mockEngine = require('../utils/mockEngine');
-                            currentPrice = mockEngine.getPrice(base) || trade.entry_price;
-                        }
 
                         if (trade.market_type === 'MCX') {
                             const brokerMargins = userConfig.brokerMcxMargins || {};
@@ -98,6 +77,18 @@ const startRolloverMarginJob = () => {
                             if (holdingMarginPerLot <= 1) continue;
                             totalHoldingRequired = holdingMarginPerLot * trade.qty;
                         } else {
+                            // 🎯 Live Price Detection for non-MCX
+                            const searchPatterns = [trade.symbol, `NSE:${trade.symbol}`, `NFO:${trade.symbol}`, `FOREX:${trade.symbol}`, `CRYPTO:${trade.symbol}`];
+                            let currentPrice = null;
+                            for (const p of searchPatterns) {
+                                const data = marketDataService.getPrice(p);
+                                if (data) {
+                                    currentPrice = data.ltp || data.price;
+                                    break;
+                                }
+                            }
+                            if (!currentPrice) currentPrice = trade.entry_price;
+
                             const exposure = parseFloat(userConfig.forexConfig?.holdingMargin || 500);
                             totalHoldingRequired = (currentPrice * trade.qty) / (exposure || 1);
                         }
@@ -110,27 +101,14 @@ const startRolloverMarginJob = () => {
                             await db.execute('UPDATE users SET balance = balance - ? WHERE id = ?', [shortfall, trade.user_id]);
                             await db.execute('UPDATE trades SET margin_used = ? WHERE id = ?', [totalHoldingRequired, trade.id]);
                         } else {
-                            // Force close with brokerage
-                            const pnl = trade.type === 'BUY'
-                                ? (currentPrice - trade.entry_price) * trade.qty * multiplier
-                                : (trade.entry_price - currentPrice) * trade.qty * multiplier;
-
-                            let brokerage = 0;
-                            const bType = (userConfig.mcxBrokerageType || 'per_crore').toLowerCase();
-                            if (bType === 'per_lot') {
-                                const lotBrokerageMap = { ...userConfig.brokerMcxBrokerage, ...userConfig.mcxLotBrokerage };
-                                const rate = parseFloat(lotBrokerageMap[base] || lotBrokerageMap[trade.symbol] || userConfig.mcxLotBrokerageDefault || 0);
-                                brokerage = trade.qty * rate;
-                            } else {
-                                const rate = parseFloat(userConfig.mcxBrokerage || 0);
-                                const turnover = (parseFloat(trade.entry_price) + parseFloat(currentPrice)) * trade.qty * multiplier;
-                                brokerage = (turnover / 10000000) * rate;
-                            }
-
-                            const balanceChange = pnl - brokerage;
-                            await db.execute('UPDATE trades SET status = "CLOSED", exit_price = ?, exit_time = NOW(), pnl = ?, brokerage = ?, closed_by = "ADMIN" WHERE id = ?', [currentPrice, pnl, brokerage, trade.id]);
-                            await db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', [balanceChange, trade.user_id]);
+                            console.log(`[RolloverCheck] 🚨 Insufficient funds for rollover - Auto-closing trade #${trade.id}`);
+                            // Force close using central TradeService logic
+                            await tradeService.closeTrade(trade.id, null, 0); 
                         }
+                    } catch (err) {
+                        console.error(`[RolloverCheck] Error trade #${trade.id}:`, err.message);
+                    }
+                }
                     } catch (err) {
                         console.error(`[RolloverCheck] Error trade #${trade.id}:`, err.message);
                     }

@@ -3,6 +3,7 @@ const db = require('../config/db');
 const { getMcxBaseScrip } = require('../utils/symbolHelper');
 const marketDataService = require('./MarketDataService');
 const kiteService = require('../utils/kiteService');
+const tradeService = require('./TradeService');
 
 /**
  * Helper to calculate brokerage based on type
@@ -74,81 +75,32 @@ const startExpirySquareOffJob = () => {
 
                 for (const trade of allOpenTrades) {
                     try {
-                        const userBalance = parseFloat(trade.balance || 0);
-                        let userConfig = {};
-                        try { userConfig = JSON.parse(trade.config_json || '{}'); } catch (e) {}
-
+                        const userConfig = JSON.parse(trade.config_json || '{}');
                         const base = getMcxBaseScrip(trade.symbol);
                         const defaultHolding = 1000000;
                         let holdingExposure = parseFloat(userConfig?.mcxHoldingMargin || defaultHolding);
 
-                        if (userConfig?.mcxLotMargins) {
-                            if (userConfig.mcxLotMargins[base]?.HOLDING) holdingExposure = parseFloat(userConfig.mcxLotMargins[base].HOLDING);
+                        if (userConfig?.mcxLotMargins && userConfig.mcxLotMargins[base]?.HOLDING) {
+                            holdingExposure = parseFloat(userConfig.mcxLotMargins[base].HOLDING);
                         }
 
                         const holdingMarginRequired = holdingExposure * trade.qty;
 
-                        if (userBalance < holdingMarginRequired) {
-                            let exitPrice = null;
-                            const searchPatterns = [trade.symbol, `MCX:${trade.symbol}`];
-
-                            for (const pattern of searchPatterns) {
-                                const liveData = marketDataService.getPrice(pattern);
-                                if (liveData) {
-                                    exitPrice = trade.type === 'BUY' ? (liveData.bid || liveData.ltp) : (liveData.ask || liveData.ltp);
-                                    if (exitPrice && exitPrice > 0) break;
-                                }
+                        // 🎯 If balance is less than required holding margin, square off
+                        if (parseFloat(trade.balance) < holdingMarginRequired) {
+                            console.log(`[ExpirySquareOff] 🚨 Auto-squaring off trade #${trade.id} for User #${trade.user_id} (Insufficient Holding Margin)`);
+                            
+                            // Use central TradeService for consistent price/brokerage/balance logic
+                            const result = await tradeService.closeTrade(trade.id, null, 0); 
+                            
+                            if (result.success) {
+                                console.log(`[ExpirySquareOff] ✅ Squared off trade #${trade.id} @ ${result.exitPrice || 'market'}`);
                             }
-
-                            if (!exitPrice && kiteService.isAuthenticated()) {
-                                try {
-                                    const kiteSym = trade.symbol.includes(':') ? trade.symbol : `MCX:${trade.symbol}`;
-                                    const quoteRes = await kiteService.getQuote(kiteSym);
-                                    const quote = quoteRes[kiteSym] || Object.values(quoteRes)[0];
-                                    if (quote) exitPrice = trade.type === 'BUY' ? (quote.depth?.buy?.[0]?.price || quote.last_price) : (quote.depth?.sell?.[0]?.price || quote.last_price);
-                                } catch (_) {}
-                            }
-
-                            if (!exitPrice || exitPrice <= 0) {
-                                const mockEngine = require('../utils/mockEngine');
-                                exitPrice = mockEngine.getPrice(base) || trade.entry_price;
-                            }
-
-                            const INSTRUMENT_META = {
-                                'CRUDEOIL': 100, 'NATURALGAS': 1250, 'GOLD': 100, 'GOLDM': 10,
-                                'SILVER': 30, 'SILVERM': 5, 'COPPER': 2500, 'ZINC': 5000,
-                                'NICKEL': 1500, 'LEAD': 5000, 'ALUMINIUM': 5000, 'MENTHAOIL': 360,
-                                'COTTON': 25, 'BULLDEX': 1, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
-                                'ZINCMINI': 1000, 'LEADMINI': 1000, 'NICKELMINI': 100, 'ALUMINI': 1000,
-                                'CRUDEOILM': 10, 'NATGASMINI': 250, 'SILVERMIC': 1
-                            };
-                            const multiplier = INSTRUMENT_META[base] || 1;
-
-                            const pnl = trade.type === 'BUY'
-                                ? (exitPrice - trade.entry_price) * trade.qty * multiplier
-                                : (trade.entry_price - exitPrice) * trade.qty * multiplier;
-
-                            // ─── BROKERAGE CALCULATION ───
-                            let brokerage = 0;
-                            const bType = (userConfig.mcxBrokerageType || 'per_crore').toLowerCase();
-                            if (bType === 'per_lot') {
-                                const lotBrokerageMap = { ...userConfig.brokerMcxBrokerage, ...userConfig.mcxLotBrokerage };
-                                const rate = parseFloat(lotBrokerageMap[base] || lotBrokerageMap[trade.symbol] || userConfig.mcxLotBrokerageDefault || 0);
-                                brokerage = trade.qty * rate;
-                            } else {
-                                const rate = parseFloat(userConfig.mcxBrokerage || 0);
-                                const turnover = (parseFloat(trade.entry_price) + parseFloat(exitPrice)) * trade.qty * multiplier;
-                                brokerage = (turnover / 10000000) * rate;
-                            }
-
-                            const balanceChange = pnl - brokerage;
-
-                            await db.execute(
-                                `UPDATE trades SET status = 'CLOSED', exit_price = ?, pnl = ?, brokerage = ?, exit_time = NOW(), closed_by = 'ADMIN' WHERE id = ?`,
-                                [exitPrice, pnl, brokerage, trade.id]
-                            );
-                            await db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', [balanceChange, trade.user_id]);
                         }
+                    } catch (err) {
+                        console.error(`[ExpirySquareOff] Error trade #${trade.id}:`, err.message);
+                    }
+                }
                     } catch (err) {
                         console.error(`[ExpirySquareOff] Error trade #${trade.id}:`, err.message);
                     }

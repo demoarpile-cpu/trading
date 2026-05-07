@@ -2,6 +2,7 @@ const db = require('../config/db');
 const mockEngine = require('../utils/mockEngine');
 const { logAction } = require('../controllers/systemController');
 const { invalidateCache } = require('../utils/cacheManager');
+const kiteService = require('../utils/kiteService');
 
 /**
  * Service to handle core Trade operations like closing and auto-squaring off.
@@ -81,14 +82,44 @@ class TradeService {
             let finalExitPrice = exitPrice;
             if (!finalExitPrice || finalExitPrice <= 0) {
                 const { getMcxBaseScrip } = require('../utils/symbolHelper');
-                const cleanSymbol = getMcxBaseScrip(trade.symbol);
+                const base = getMcxBaseScrip(trade.symbol);
                 const marketDataService = require('./MarketDataService');
-                const liveData = marketDataService.getPrice(trade.symbol) || marketDataService.getPrice(`MCX:${trade.symbol}`);
+                
+                // 🎯 1. Try Memory Ticker (Multiple Prefixes)
+                const searchPatterns = [trade.symbol, `MCX:${trade.symbol}`, `NFO:${trade.symbol}`, `NSE:${trade.symbol}`];
+                let liveData = null;
+                for (const p of searchPatterns) {
+                    liveData = marketDataService.getPrice(p);
+                    if (liveData) break;
+                }
                 
                 if (liveData) {
                     finalExitPrice = trade.type === 'BUY' ? (liveData.bid || liveData.ltp) : (liveData.ask || liveData.ltp);
-                } else {
-                    finalExitPrice = mockEngine.getPrice(cleanSymbol) || trade.entry_price;
+                    console.log(`[TradeService] Found in Ticker: ${finalExitPrice} (${trade.type === 'BUY' ? 'BID' : 'ASK'})`);
+                } 
+                
+                // 🎯 2. Fallback to Kite API (Full Quote)
+                if ((!finalExitPrice || finalExitPrice <= 0) && kiteService.isAuthenticated()) {
+                    try {
+                        const kiteSym = trade.symbol.includes(':') ? trade.symbol : (mType === 'MCX' ? `MCX:${trade.symbol}` : (mType === 'EQUITY' ? `NSE:${trade.symbol}` : `NFO:${trade.symbol}`));
+                        console.log(`[TradeService] Fetching Live Quote from Kite: ${kiteSym}`);
+                        const quoteRes = await kiteService.getQuote(kiteSym);
+                        const quote = quoteRes[kiteSym] || Object.values(quoteRes)[0];
+                        if (quote) {
+                            finalExitPrice = trade.type === 'BUY' 
+                                ? (quote.depth?.buy?.[0]?.price || quote.last_price) 
+                                : (quote.depth?.sell?.[0]?.price || quote.last_price);
+                            console.log(`[TradeService] Kite Quote Received: ${finalExitPrice}`);
+                        }
+                    } catch (e) {
+                        console.error(`[TradeService] Kite Quote Error:`, e.message);
+                    }
+                }
+
+                // 🎯 3. Final Fallback (Mock or Entry)
+                if (!finalExitPrice || finalExitPrice <= 0) {
+                    finalExitPrice = mockEngine.getPrice(base) || trade.entry_price;
+                    console.log(`[TradeService] Using Fallback Price: ${finalExitPrice}`);
                 }
             }
 
