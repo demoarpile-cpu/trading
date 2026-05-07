@@ -124,59 +124,11 @@ setIo(io);
 // Auto-sync Kite instruments into database
 async function syncKiteInstrumentsOnStartup() {
     try {
-        const kiteService = require('./utils/kiteService');
-        const db = require('./config/db');
-
-        if (!kiteService.isAuthenticated()) {
-            return;
-        }
-        const instruments = await kiteService.getInstruments();
-
-        if (!Array.isArray(instruments) || instruments.length === 0) {
-            return;
-        }
-
-        const seen = new Set();
-        let syncCount = 0;
-
-        for (const i of instruments) {
-            if (i.exchange === 'NSE' && i.instrument_type === 'EQ') {
-                const symbol = i.tradingsymbol;
-                const key = `NSE:${symbol}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-
-                const lotSize = parseInt(i.lot_size) || 1;
-                try {
-                    await db.execute(
-                        `INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type)
-                         VALUES (?, ?, ?, ?)
-                         ON DUPLICATE KEY UPDATE lot_size = VALUES(lot_size), market_type = VALUES(market_type)`,
-                        [symbol, lotSize, 50, 'EQUITY']
-                    );
-                    syncCount++;
-                } catch (_) {}
-            } else if ((i.exchange === 'MCX' || i.exchange === 'NFO') && i.instrument_type === 'FUT') {
-                const symbol = i.name || i.tradingsymbol;
-                const key = `${i.exchange}:${symbol}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-
-                const lotSize = parseInt(i.lot_size) || 1;
-                const marketType = i.exchange === 'MCX' ? 'MCX' : 'NFO';
-                try {
-                    await db.execute(
-                        `INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type)
-                         VALUES (?, ?, ?, ?)
-                         ON DUPLICATE KEY UPDATE lot_size = VALUES(lot_size), market_type = VALUES(market_type)`,
-                        [symbol, lotSize, 50, marketType]
-                    );
-                    syncCount++;
-                } catch (_) {}
-            }
-        }
-
+        const instrumentSyncService = require('./services/InstrumentSyncService');
+        await instrumentSyncService.sync();
+        instrumentSyncService.startSyncJob();
     } catch (err) {
+        console.error('❌ Startup sync failed:', err.message);
     }
 }
 

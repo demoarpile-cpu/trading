@@ -122,7 +122,7 @@ function getTokenSync(symbol) {
 
 // ── NIFTY 50 (50 stocks — Apr 2026 official list, Zerodha exact symbols) ──
 /** Bump when default unified watchlist shape changes (invalidates HTTP cache + precompute). */
-const WATCHLIST_CACHE_BUST = 'watchlist_v4_nfo_index_opts';
+const WATCHLIST_CACHE_BUST = 'watchlist_v5_lot_sizes_fix';
 
 /** NFO index options included in unified watchlist (instruments + quotes from Kite only). */
 const NFO_INDEX_OPTION_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY']);
@@ -340,7 +340,7 @@ function toYmd(dateLike) {
     return d.toISOString().substring(0, 10);
 }
 
-function buildUnifiedRow({ type, symbol, strike, optionType, expiry, quote }) {
+function buildUnifiedRow({ type, symbol, strike, optionType, expiry, quote, lotSize }) {
     const ltp = quote?.last_price || 0;
     const close = quote?.ohlc?.close || 0;
     const chgPct = close ? Number((((ltp - close) / close) * 100).toFixed(2)) : 0;
@@ -357,6 +357,7 @@ function buildUnifiedRow({ type, symbol, strike, optionType, expiry, quote }) {
         oi: quote?.oi || 0,
         volume: quote?.volume || 0,
         change: chgPct,
+        lotSize: lotSize || 1
     };
 }
 
@@ -964,24 +965,42 @@ async function _buildWatchlistData(query, userId) {
     const results = await Promise.all(chunks.map(chunk => kiteService.getQuote(chunk).catch(() => ({}))));
     for (const r of results) if (r && typeof r === 'object') Object.assign(rawQuotes, r);
 
+    // Fetch lot sizes from database
+    const [lotRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
+    const lotMap = {};
+    lotRows.forEach(r => {
+        lotMap[r.symbol.toUpperCase()] = parseFloat(r.lot_size || 1);
+    });
+    
+    console.log(`📊 Loaded ${Object.keys(lotMap).length} lot sizes from scrip_data`);
+
+    const getLotSize = (key) => {
+        const sym = key.includes(':') ? key.split(':')[1] : key;
+        const ls = lotMap[sym.toUpperCase()] || 1;
+        if (sym.includes('NIFTY')) {
+            console.log(`🔍 Lot size for ${sym}: ${ls}`);
+        }
+        return ls;
+    };
+
     // ── Step 6: Build all rows ──
     let rows = [];
-    for (const key of pc.nseKeys) rows.push(buildUnifiedRow({ type: 'NSE', symbol: key, quote: rawQuotes[key] }));
+    for (const key of pc.nseKeys) rows.push(buildUnifiedRow({ type: 'NSE', symbol: key, quote: rawQuotes[key], lotSize: getLotSize(key) }));
     for (const key of pc.nfoFutKeys) {
         const m = pc.nfoFutMeta[key] || {};
-        rows.push(buildUnifiedRow({ type: 'FUT', symbol: key, expiry: m.expiry, quote: rawQuotes[key] }));
+        rows.push(buildUnifiedRow({ type: 'FUT', symbol: key, expiry: m.expiry, quote: rawQuotes[key], lotSize: getLotSize(key) }));
     }
     for (const key of nfoOptKeys) {
         const m = nfoOptMeta[key] || {};
-        rows.push(buildUnifiedRow({ type: 'NFO_OPT', symbol: key, strike: m.strike, optionType: m.optionType, expiry: m.expiry, quote: rawQuotes[key] }));
+        rows.push(buildUnifiedRow({ type: 'NFO_OPT', symbol: key, strike: m.strike, optionType: m.optionType, expiry: m.expiry, quote: rawQuotes[key], lotSize: getLotSize(key) }));
     }
     for (const key of mcxFutKeys) {
         const m = mcxFutMeta[key] || {};
-        rows.push(buildUnifiedRow({ type: 'MCX_FUT', symbol: key, expiry: m.expiry, quote: rawQuotes[key] }));
+        rows.push(buildUnifiedRow({ type: 'MCX_FUT', symbol: key, expiry: m.expiry, quote: rawQuotes[key], lotSize: getLotSize(key) }));
     }
     for (const key of mcxOptKeys) {
         const m = mcxOptMeta[key] || {};
-        rows.push(buildUnifiedRow({ type: 'MCX_OPT', symbol: key, strike: m.strike, optionType: m.optionType, expiry: m.expiry, quote: rawQuotes[key] }));
+        rows.push(buildUnifiedRow({ type: 'MCX_OPT', symbol: key, strike: m.strike, optionType: m.optionType, expiry: m.expiry, quote: rawQuotes[key], lotSize: getLotSize(key) }));
     }
 
     // ── Step 7: Gather Contract Management Exclusions (Visibility decided by frontend) ──

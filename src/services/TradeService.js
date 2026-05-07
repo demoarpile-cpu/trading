@@ -50,32 +50,71 @@ class TradeService {
             }
 
             // 3. Normal Market Order Closure
-            // Use multiplier from INSTRUMENT_META (hardcoded values for MCX/NSE)
             let lotSize = 1;
             const mType = (trade.market_type || '').toUpperCase();
 
-            // INSTRUMENT_META multipliers (from TradeContext.js)
-            const INSTRUMENT_META = {
-                'CRUDEOIL': 100, 'NATURALGAS': 1250, 'GOLD': 100, 'GOLDM': 10,
-                'SILVER': 30, 'SILVERM': 5, 'COPPER': 2500, 'ZINC': 5000,
-                'NICKEL': 1500, 'LEAD': 5000, 'ALUMINIUM': 5000, 'MENTHAOIL': 360,
-                'COTTON': 25, 'BULLDEX': 1, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
-                'ZINCMINI': 1000, 'LEADMINI': 1000, 'NICKELMINI': 100, 'ALUMINI': 1000,
-                'CRUDEOILM': 10, 'NATGASMINI': 250, 'SILVERMIC': 1,
-                'TCS': 1, 'RELIANCE': 1, 'SBIN': 1, 'INFY': 1
-            };
+            // ══════════════════════════════════════════════════════════════════
+            // MCX LOT SIZE (100% Complete - DO NOT MODIFY)
+            // ══════════════════════════════════════════════════════════════════
+            if (mType === 'MCX') {
+                const MCX_LOT_SIZES = {
+                    'CRUDEOIL': 100, 'NATURALGAS': 1250, 'GOLD': 100, 'GOLDM': 10,
+                    'SILVER': 30, 'SILVERM': 5, 'COPPER': 2500, 'ZINC': 5000,
+                    'NICKEL': 1500, 'LEAD': 5000, 'ALUMINIUM': 5000, 'MENTHAOIL': 360,
+                    'COTTON': 25, 'BULLDEX': 1, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
+                    'ZINCMINI': 1000, 'LEADMINI': 1000, 'NICKELMINI': 100, 'ALUMINI': 1000,
+                    'CRUDEOILM': 10, 'NATGASMINI': 250, 'SILVERMIC': 1
+                };
 
-            if (mType === 'MCX' || mType === 'EQUITY') {
-                const baseSymbol = Object.keys(INSTRUMENT_META).find(key => trade.symbol.toUpperCase().includes(key));
-                if (baseSymbol && INSTRUMENT_META[baseSymbol]) {
-                    lotSize = INSTRUMENT_META[baseSymbol];
+                const baseSymbol = Object.keys(MCX_LOT_SIZES).find(key => trade.symbol.toUpperCase().includes(key));
+                if (baseSymbol && MCX_LOT_SIZES[baseSymbol]) {
+                    lotSize = MCX_LOT_SIZES[baseSymbol];
+                    console.log(`[TradeService] MCX Lot Size: ${trade.symbol} → ${lotSize}`);
                 } else {
                     lotSize = 1;
                 }
-            } else {
-                const [scripRows] = await connection.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
-                if (scripRows.length > 0 && parseFloat(scripRows[0].lot_size) > 1) {
-                    lotSize = parseFloat(scripRows[0].lot_size);
+            }
+            // ══════════════════════════════════════════════════════════════════
+            // EQUITY (NSE) LOT SIZE
+            // ══════════════════════════════════════════════════════════════════
+            else if (mType === 'EQUITY') {
+                try {
+                    // Try to get from database first
+                    const [scripRows] = await connection.execute(
+                        'SELECT lot_size FROM scrip_data WHERE symbol = ?',
+                        [trade.symbol]
+                    );
+
+                    if (scripRows.length > 0) {
+                        lotSize = parseFloat(scripRows[0].lot_size) || 1;
+                        console.log(`[TradeService] EQUITY Lot Size (from DB): ${trade.symbol} → ${lotSize}`);
+                    } else {
+                        // Default: Equity lot size is always 1 (trading in individual shares)
+                        lotSize = 1;
+                        console.log(`[TradeService] EQUITY Lot Size (default): ${trade.symbol} → 1`);
+                    }
+                } catch (e) {
+                    lotSize = 1;
+                    console.error(`[TradeService] Error fetching EQUITY lot size:`, e.message);
+                }
+            }
+            // ══════════════════════════════════════════════════════════════════
+            // OTHER SEGMENTS (NFO, OPTIONS, etc.)
+            // ══════════════════════════════════════════════════════════════════
+            else {
+                try {
+                    const [scripRows] = await connection.execute(
+                        'SELECT lot_size FROM scrip_data WHERE symbol = ?',
+                        [trade.symbol]
+                    );
+                    if (scripRows.length > 0 && parseFloat(scripRows[0].lot_size) > 1) {
+                        lotSize = parseFloat(scripRows[0].lot_size);
+                        console.log(`[TradeService] ${mType} Lot Size (from DB): ${trade.symbol} → ${lotSize}`);
+                    } else {
+                        lotSize = 1;
+                    }
+                } catch (e) {
+                    lotSize = 1;
                 }
             }
 
@@ -124,16 +163,18 @@ class TradeService {
             }
 
             // Use provided P/L from frontend if available (calculated at the moment of exit)
-            // Otherwise calculate it based on exit price and lot size
+            // Otherwise calculate it based on exit price and actual_qty (for new trades with units/lots mode)
             let pnl;
             if (providedPnl !== null && providedPnl !== undefined) {
                 pnl = parseFloat(providedPnl);
                 console.log(`[TradeService] Using provided P/L: ${pnl}`);
             } else {
+                // Use actual_qty if available (new trades with units/lots), fallback to calculated qty
+                const qtyForPnl = trade.actual_qty || (trade.qty * lotSize);
                 pnl = trade.type === 'BUY'
-                    ? (finalExitPrice - trade.entry_price) * trade.qty * lotSize
-                    : (trade.entry_price - finalExitPrice) * trade.qty * lotSize;
-                console.log(`[TradeService] Calculated P/L: ${pnl}`);
+                    ? (finalExitPrice - trade.entry_price) * qtyForPnl
+                    : (trade.entry_price - finalExitPrice) * qtyForPnl;
+                console.log(`[TradeService] Calculated P/L using ${trade.actual_qty ? 'actual_qty' : 'qty×lotSize'}: ${pnl}`);
             }
 
             // 4. Calculate Brokerage & Swap
@@ -210,8 +251,10 @@ class TradeService {
 
             if (scripRate !== undefined && scripRate > 0) {
                 // Priority 1: Scrip-specific from config
-                brokerage = trade.qty * scripRate;
-                console.log(`[TradeService] Scrip-specific Brokerage: Raw=${rawSymbol}, Clean=${cleanSymbol}, Rate=${scripRate}, Calculated=${brokerage.toFixed(2)}`);
+                // Use actual_qty if available (new trades), fallback to qty
+                const qtyForBrokerage = trade.actual_qty || trade.qty;
+                brokerage = qtyForBrokerage * scripRate;
+                console.log(`[TradeService] Scrip-specific Brokerage: Raw=${rawSymbol}, Clean=${cleanSymbol}, Rate=${scripRate}, Qty=${qtyForBrokerage}, Calculated=${brokerage.toFixed(2)}`);
             } else {
                 // Priority 2: Segment Settings from user_segments
                 const [segmentRows] = await connection.execute(
@@ -221,19 +264,25 @@ class TradeService {
 
                 if (segmentRows.length > 0 && parseFloat(segmentRows[0].brokerage_value) > 0) {
                     const seg = segmentRows[0];
-                    brokerage = calcBrokerage(seg.brokerage_value, seg.brokerage_type, trade.qty, finalExitPrice, trade.entry_price, lotSize);
-                    console.log(`[TradeService] Segment ${trade.market_type} Brokerage: Rate=${seg.brokerage_value}, Type=${seg.brokerage_type}, Calculated=${brokerage.toFixed(2)}`);
+                    // Use actual_qty if available (includes lot multiplication already), otherwise use qty×lotSize
+                    const qtyForBrokerageCalc = trade.actual_qty || trade.qty;
+                    const multiplierForBrokerage = trade.actual_qty ? 1 : lotSize;
+                    brokerage = calcBrokerage(seg.brokerage_value, seg.brokerage_type, qtyForBrokerageCalc, finalExitPrice, trade.entry_price, multiplierForBrokerage);
+                    console.log(`[TradeService] Segment ${trade.market_type} Brokerage: Rate=${seg.brokerage_value}, Type=${seg.brokerage_type}, Qty=${qtyForBrokerageCalc}, Calculated=${brokerage.toFixed(2)}`);
                 } else {
                     // Priority 3: General Fallback from client_settings
+                    const qtyForClientBrokerage = trade.actual_qty || trade.qty;
+                    const multiplierForClientBrokerage = trade.actual_qty ? 1 : lotSize;
+
                     if (mType === 'MCX') {
                         const brokerageType = (clientConfig.mcxBrokerageType || 'per_crore').toLowerCase();
                         let rate = parseFloat(clientConfig.mcxBrokerage || 0);
 
                         const calcType = brokerageType === 'per_lot' ? 'PER_LOT' : 'PER_CRORE';
-                        brokerage = calcBrokerage(rate, calcType, trade.qty, finalExitPrice, trade.entry_price, lotSize);
+                        brokerage = calcBrokerage(rate, calcType, qtyForClientBrokerage, finalExitPrice, trade.entry_price, multiplierForClientBrokerage);
                     } else if (mType === 'EQUITY') {
                         const rate = parseFloat(clientConfig.brokerEquityBrokerage || clientConfig.equityBrokerage || 0);
-                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price, lotSize);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', qtyForClientBrokerage, finalExitPrice, trade.entry_price, multiplierForClientBrokerage);
                     } else if (mType === 'OPTIONS') {
                         let rate = 0;
                         if (cleanSymbol.includes('NIFTY') || cleanSymbol.includes('BANKNIFTY')) {
@@ -243,16 +292,16 @@ class TradeService {
                         } else {
                             rate = parseFloat(clientConfig.brokerOptionsEquityBrokerage || clientConfig.optionsEquityBrokerage || 20);
                         }
-                        brokerage = trade.qty * rate;
+                        brokerage = qtyForClientBrokerage * rate;
                     } else if (mType === 'COMEX') {
                         const rate = parseFloat(clientConfig.comexBrokerage || 0);
-                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price, lotSize);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', qtyForClientBrokerage, finalExitPrice, trade.entry_price, multiplierForClientBrokerage);
                     } else if (mType === 'FOREX') {
                         const rate = parseFloat(clientConfig.forexBrokerage || 0);
-                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price, lotSize);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', qtyForClientBrokerage, finalExitPrice, trade.entry_price, multiplierForClientBrokerage);
                     } else if (mType === 'CRYPTO') {
                         const rate = parseFloat(clientConfig.cryptoBrokerage || 0);
-                        brokerage = calcBrokerage(rate, 'PER_LOT', trade.qty, finalExitPrice, trade.entry_price, lotSize);
+                        brokerage = calcBrokerage(rate, 'PER_LOT', qtyForClientBrokerage, finalExitPrice, trade.entry_price, multiplierForClientBrokerage);
                     }
                     
                     if (brokerage > 0) {
@@ -269,7 +318,8 @@ class TradeService {
                 const entryTime = new Date(trade.entry_time);
                 const daysHeld = Math.ceil((new Date() - entryTime) / (1000 * 60 * 60 * 24));
                 if ((trade.market_type === 'MCX' || trade.market_type === 'EQUITY') && daysHeld > 1) {
-                    swap = trade.qty * brokerSwapRate * (daysHeld - 1);
+                    const qtyForSwap = trade.actual_qty || trade.qty;
+                    swap = qtyForSwap * brokerSwapRate * (daysHeld - 1);
                 }
             }
 

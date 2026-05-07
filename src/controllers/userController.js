@@ -168,7 +168,7 @@ const updateStatus = async (req, res) => {
             await invalidateCache(`users_${currentUserId}_all`);
             await invalidateCache(`users_${currentUserId}_TRADER`);
             await invalidateCache(`users_${currentUserId}_BROKER`);
-        } catch (e) {}
+        } catch (e) { }
 
         res.json({ message: 'Status updated successfully' });
     } catch (err) {
@@ -183,7 +183,7 @@ const resetPassword = async (req, res) => {
     try {
         const hashedPassword = await bcrypt.hash(newPassword, 10);
         await db.execute('UPDATE users SET password = ? WHERE id = ?', [hashedPassword, req.params.id]);
-        
+
         // Log the action
         await logAction(req.user.id, 'RESET_PASSWORD', 'users', `Reset password for user ID ${req.params.id}`);
 
@@ -240,7 +240,7 @@ const deleteUser = async (req, res) => {
             await invalidateCache(`users_${currentUserId}_all`);
             await invalidateCache(`users_${currentUserId}_TRADER`);
             await invalidateCache(`users_${currentUserId}_BROKER`);
-        } catch (e) {}
+        } catch (e) { }
 
         res.json({ message: 'User deleted successfully' });
     } catch (err) {
@@ -257,15 +257,15 @@ const updateUser = async (req, res) => {
         const fields = [];
         const values = [];
 
-        if (fullName !== undefined)         { fields.push('full_name = ?');          values.push(fullName); }
-        if (email !== undefined)            { fields.push('email = ?');              values.push(email); }
-        if (mobile !== undefined)           { fields.push('mobile = ?');             values.push(mobile); }
-        if (city !== undefined)             { fields.push('city = ?');               values.push(city); }
-        if (creditLimit !== undefined)      { fields.push('credit_limit = ?');       values.push(creditLimit); }
-        if (exposureMultiplier !== undefined){ fields.push('exposure_multiplier = ?'); values.push(exposureMultiplier); }
-        if (isDemo !== undefined)           { fields.push('is_demo = ?');            values.push(isDemo ? 1 : 0); }
-        if (status !== undefined)           { fields.push('status = ?');             values.push(status); }
-        if (parentId !== undefined)         { fields.push('parent_id = ?');          values.push(parseInt(parentId) || null); }
+        if (fullName !== undefined) { fields.push('full_name = ?'); values.push(fullName); }
+        if (email !== undefined) { fields.push('email = ?'); values.push(email); }
+        if (mobile !== undefined) { fields.push('mobile = ?'); values.push(mobile); }
+        if (city !== undefined) { fields.push('city = ?'); values.push(city); }
+        if (creditLimit !== undefined) { fields.push('credit_limit = ?'); values.push(creditLimit); }
+        if (exposureMultiplier !== undefined) { fields.push('exposure_multiplier = ?'); values.push(exposureMultiplier); }
+        if (isDemo !== undefined) { fields.push('is_demo = ?'); values.push(isDemo ? 1 : 0); }
+        if (status !== undefined) { fields.push('status = ?'); values.push(status); }
+        if (parentId !== undefined) { fields.push('parent_id = ?'); values.push(parseInt(parentId) || null); }
 
         if (fields.length === 0) return res.status(400).json({ message: 'No fields to update' });
 
@@ -281,14 +281,14 @@ const updateUser = async (req, res) => {
             await invalidateCache(`users_${req.user.id}_all`);
             await invalidateCache(`users_${req.user.id}_TRADER`);
             await invalidateCache(`users_${req.user.id}_BROKER`);
-            
+
             // Also invalidate the parent's cache if different
             if (parentId && parseInt(parentId) !== req.user.id) {
                 await invalidateCache(`users_${parentId}_all`);
                 await invalidateCache(`users_${parentId}_TRADER`);
                 await invalidateCache(`users_${parentId}_BROKER`);
             }
-            
+
             console.log(`[Cache] Cleared user list caches for updater ${req.user.id}`);
         } catch (e) {
             console.log(`[Cache] Clear failed but update succeeded`);
@@ -304,6 +304,7 @@ const updateUser = async (req, res) => {
 
 // ─── CLIENT SETTINGS ─────────────────────────────────
 const updateClientSettings = async (req, res) => {
+    console.log('[DEBUG] REACHED updateClientSettings for user:', req.params.id);
     const {
         allowFreshEntry, allowOrdersBetweenHL, tradeEquityUnits,
         autoCloseEnabled, banAllSegmentLimitOrder,
@@ -342,6 +343,21 @@ const updateClientSettings = async (req, res) => {
 
         const configJson = Object.keys(configObj).length > 0 ? JSON.stringify(configObj) : null;
 
+        const sqlParams = [
+            req.params.id,
+            allowFreshEntry !== undefined ? (allowFreshEntry == 1 || allowFreshEntry === true || allowFreshEntry === 'true' ? 1 : 0) : 1,
+            allowOrdersBetweenHL !== undefined ? (allowOrdersBetweenHL == 1 || allowOrdersBetweenHL === true || allowOrdersBetweenHL === 'true' ? 1 : 0) : 1,
+            tradeEquityUnits !== undefined ? (tradeEquityUnits == 1 || tradeEquityUnits === true || tradeEquityUnits === 'true' ? 1 : 0) : 0,
+            autoClosePct !== undefined ? autoClosePct : 90,
+            notifyPct !== undefined ? notifyPct : 70,
+            minProfitTime !== undefined ? minProfitTime : 120,
+            scalpingSlEnabled !== undefined ? (scalpingSlEnabled === true || scalpingSlEnabled === 'Enabled' || scalpingSlEnabled == 1 ? 1 : 0) : 0,
+            banAllSegmentLimitOrder !== undefined ? (banAllSegmentLimitOrder == 1 || banAllSegmentLimitOrder === true || banAllSegmentLimitOrder === 'true' ? 1 : 0) : 0,
+            configJson,
+            brokerId || null
+        ];
+        console.log('[DEBUG] SQL Params for Client Settings:', sqlParams);
+
         await db.execute(`
             INSERT INTO client_settings
                 (user_id, allow_fresh_entry, allow_orders_between_hl, trade_equity_units,
@@ -359,19 +375,7 @@ const updateClientSettings = async (req, res) => {
                 ban_all_segment_limit_order = VALUES(ban_all_segment_limit_order),
                 config_json = VALUES(config_json),
                 broker_id = VALUES(broker_id)
-        `, [
-            req.params.id,
-            allowFreshEntry !== undefined ? (allowFreshEntry ? 1 : 0) : 1,
-            allowOrdersBetweenHL !== undefined ? (allowOrdersBetweenHL ? 1 : 0) : 1,
-            tradeEquityUnits !== undefined ? (tradeEquityUnits ? 1 : 0) : 0,
-            autoClosePct !== undefined ? autoClosePct : 90,
-            notifyPct !== undefined ? notifyPct : 70,
-            minProfitTime !== undefined ? minProfitTime : 120,
-            scalpingSlEnabled !== undefined ? (scalpingSlEnabled === true || scalpingSlEnabled === 'Enabled' ? 1 : 0) : 0,
-            banAllSegmentLimitOrder !== undefined ? (banAllSegmentLimitOrder ? 1 : 0) : 0,
-            configJson,
-            brokerId || null
-        ]);
+        `, sqlParams);
 
         // ─── SYNC to user_segments table for mobile app consistency ─────
         if (configObj) {
@@ -511,13 +515,13 @@ const updateDocuments = async (req, res) => {
         const setFields = ['user_id = ?'];
         const values = [req.params.id];
 
-        if (panNumber !== undefined)     { setFields.push('pan_number = ?');     values.push(panNumber); }
-        if (aadharNumber !== undefined)  { setFields.push('aadhar_number = ?');  values.push(aadharNumber); }
-        if (kycStatus !== undefined)     { setFields.push('kyc_status = ?');     values.push(kycStatus); }
+        if (panNumber !== undefined) { setFields.push('pan_number = ?'); values.push(panNumber); }
+        if (aadharNumber !== undefined) { setFields.push('aadhar_number = ?'); values.push(aadharNumber); }
+        if (kycStatus !== undefined) { setFields.push('kyc_status = ?'); values.push(kycStatus); }
         if (panScreenshot !== undefined) { setFields.push('pan_screenshot = ?'); values.push(panScreenshot); }
-        if (aadharFront !== undefined)   { setFields.push('aadhar_front = ?');   values.push(aadharFront); }
-        if (aadharBack !== undefined)    { setFields.push('aadhar_back = ?');    values.push(aadharBack); }
-        if (bankProof !== undefined)     { setFields.push('bank_proof = ?');     values.push(bankProof); }
+        if (aadharFront !== undefined) { setFields.push('aadhar_front = ?'); values.push(aadharFront); }
+        if (aadharBack !== undefined) { setFields.push('aadhar_back = ?'); values.push(aadharBack); }
+        if (bankProof !== undefined) { setFields.push('bank_proof = ?'); values.push(bankProof); }
 
         // Safety: If no documents are being updated (only user_id is in setFields), return early
         if (setFields.length <= 1 && panNumber === undefined && aadharNumber === undefined && kycStatus === undefined) {
@@ -551,22 +555,22 @@ const updateDocuments = async (req, res) => {
 const getUserSegments = async (req, res) => {
     try {
         let [rows] = await db.execute('SELECT * FROM user_segments WHERE user_id = ?', [req.params.id]);
-        
+
         // Check if rows are all disabled — brokerage value is irrelevant here.
         // Previously this also checked brokerage_value === 0, which caused a bug:
         // user_segments could have is_enabled=0 with non-zero brokerage (set up but not yet enabled),
         // making isDefault=false and skipping the config_json fallback entirely, so the mobile
         // app would always see DISABLED even after the broker enabled the segments in config_json.
         const isDefault = rows.length > 0 && rows.every(r => r.is_enabled === 0);
-        
+
         if (rows.length === 0 || isDefault) {
             console.log(`[getUserSegments] Fallback: user_segments is default/empty for user ${req.params.id}. Checking client_settings...`);
             const [settingsRows] = await db.execute('SELECT config_json FROM client_settings WHERE user_id = ?', [req.params.id]);
-            
+
             if (settingsRows.length > 0 && settingsRows[0].config_json) {
                 try {
                     const config = JSON.parse(settingsRows[0].config_json);
-                    
+
                     const mappedSegments = [
                         { segment: 'MCX', is_enabled: config.mcxTrading ? 1 : 0, brokerage_type: config.mcxBrokerageType || 'PER_LOT', brokerage_value: config.mcxBrokerage || 0, max_lot_per_scrip: config.mcxMaxLotScrip || 0, exposure_multiplier: config.mcxExposureMultiplier || 1, auto_square_off: config.autoSquareOff === 'Yes' ? 1 : 0, square_off_time: config.expirySquareOffTime },
                         { segment: 'EQUITY', is_enabled: config.equityTrading ? 1 : 0, brokerage_type: 'PER_LOT', brokerage_value: config.equityBrokerage || 0, max_lot_per_scrip: config.equityMaxScrip || 0, exposure_multiplier: config.equityExposureMultiplier || 1, auto_square_off: config.autoSquareOff === 'Yes' ? 1 : 0, square_off_time: config.expirySquareOffTime },
@@ -575,7 +579,7 @@ const getUserSegments = async (req, res) => {
                         { segment: 'FOREX', is_enabled: config.forexTrading ? 1 : 0, brokerage_type: config.forexConfig?.brokerageType || 'PER_LOT', brokerage_value: config.forexConfig?.brokerage || 0, max_lot_per_scrip: config.forexConfig?.maxLotScrip || 0, exposure_multiplier: 1, auto_square_off: config.autoSquareOff === 'Yes' ? 1 : 0, square_off_time: config.expirySquareOffTime },
                         { segment: 'CRYPTO', is_enabled: config.cryptoTrading ? 1 : 0, brokerage_type: config.cryptoConfig?.brokerageType || 'PER_LOT', brokerage_value: config.cryptoConfig?.brokerage || 0, max_lot_per_scrip: config.cryptoConfig?.maxLotScrip || 0, exposure_multiplier: 1, auto_square_off: config.autoSquareOff === 'Yes' ? 1 : 0, square_off_time: config.expirySquareOffTime }
                     ];
-                    
+
                     // Return all enabled segments regardless of brokerage value (zero is allowed)
                     const finalSegments = mappedSegments.filter(s => s.is_enabled === 1);
 
@@ -598,7 +602,7 @@ const getUserSegments = async (req, res) => {
                 }
             }
         }
-        
+
         res.json(rows);
     } catch (err) {
         console.error(err);
@@ -821,9 +825,58 @@ const recalculateBrokerage = async (req, res) => {
     }
 };
 
+/**
+ * Save user watchlist (pinned symbols)
+ */
+const saveWatchlist = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { watchlist } = req.body; // Array of symbols
+
+        if (!Array.isArray(watchlist)) {
+            return res.status(400).json({ message: 'Watchlist must be an array of symbols' });
+        }
+
+        await db.execute(`
+            INSERT INTO client_settings (user_id, watchlist_json)
+            VALUES (?, ?)
+            ON DUPLICATE KEY UPDATE watchlist_json = VALUES(watchlist_json)
+        `, [userId, JSON.stringify(watchlist)]);
+
+        res.json({ message: 'Watchlist saved successfully' });
+    } catch (err) {
+        console.error('Save Watchlist Error:', err);
+        res.status(500).json({ message: 'Failed to save watchlist' });
+    }
+};
+
+/**
+ * Get user watchlist
+ */
+const getWatchlist = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const [rows] = await db.execute('SELECT watchlist_json FROM client_settings WHERE user_id = ?', [userId]);
+
+        if (!rows.length || !rows[0].watchlist_json) {
+            return res.json([]);
+        }
+
+        const watchlist = typeof rows[0].watchlist_json === 'string'
+            ? JSON.parse(rows[0].watchlist_json)
+            : rows[0].watchlist_json;
+
+        res.json(watchlist);
+    } catch (err) {
+        console.error('Get Watchlist Error:', err);
+        res.status(500).json({ message: 'Failed to fetch watchlist' });
+    }
+};
+
 module.exports = {
     getUsers, getUserProfile, updateStatus, resetPassword, deleteUser, updatePasswords,
     updateUser, updateClientSettings, getBrokerShares, updateBrokerShares,
     getDocuments, updateDocuments, getUserSegments, updateUserSegments, getBrokerClients,
-    resetAccount, recalculateBrokerage
+    resetAccount, recalculateBrokerage,
+    saveWatchlist, getWatchlist
 };

@@ -145,21 +145,21 @@ const placeOrder = async (req, res) => {
 
         // ─── PARSE QUANTITY AND PRICE EARLY (needed for validations) ──────────────
         const qtyNum = parseInt(qty, 10);
-        
+
         // Robust Live Price Fetcher (prioritize MarketDataService, then Kite API)
         let liveMarketPrice = null;
         const marketDataService = require('../services/MarketDataService');
         const liveData = marketDataService.getPrice(symbol) || marketDataService.getPrice(`MCX:${symbol}`);
-        
+
         if (liveData && liveData.ltp) {
             liveMarketPrice = liveData.ltp;
         } else if (require('../utils/kiteService').isAuthenticated()) {
             try {
                 const quote = await require('../utils/kiteService').getQuote(symbol.includes(':') ? symbol : `MCX:${symbol}`);
                 liveMarketPrice = quote[Object.keys(quote)[0]]?.last_price;
-            } catch (_) {}
+            } catch (_) { }
         }
-        
+
         if (!liveMarketPrice) {
             liveMarketPrice = mockEngine.getPrice(symbol);
             console.log(`[placeOrder] ℹ️ Live price unavailable, using Mock Engine: ${liveMarketPrice}`);
@@ -520,6 +520,9 @@ const placeOrder = async (req, res) => {
         }
 
         // 7. Calculate Margin Required with Lot Size
+        // ══════════════════════════════════════════════════════════════════
+        // MCX LOT SIZES (100% Complete - DO NOT MODIFY)
+        // ══════════════════════════════════════════════════════════════════
         const MCX_LOT_SIZES = {
             'GOLD': 100, 'GOLDM': 10, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
             'SILVER': 30, 'SILVERM': 5, 'SILVERMIC': 1,
@@ -535,39 +538,69 @@ const placeOrder = async (req, res) => {
 
         let lotSize = 1;
         try {
-            // 1. Priority: User Specific Dynamic Lot Size (from UI/Config)
-            if (clientConfig && clientConfig.mcxLotMargins) {
-                const base = getMcxBaseScrip(symbol) || symbol.toUpperCase();
-                const configLot = clientConfig.mcxLotMargins[base]?.LOT || clientConfig.mcxLotMargins[symbol.toUpperCase()]?.LOT;
-                if (configLot && parseFloat(configLot) > 0) {
-                    lotSize = parseFloat(configLot);
-                    console.log(`[placeOrder] 🎯 Using Dynamic Lot Size from Config: ${symbol} → ${lotSize}`);
-                } else {
-                    // 2. Fetch from DB if not in config
-                    const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [symbol]);
-                    if (scripRows.length > 0) {
-                        lotSize = parseFloat(scripRows[0].lot_size || 1);
-                    } else if (marketType === 'MCX') {
-                        // 3. Hardcoded Fallback
+            // ══════════════════════════════════════════════════════════════════
+            // MCX LOT SIZE LOGIC
+            // ══════════════════════════════════════════════════════════════════
+            if (marketType === 'MCX') {
+                // 1. Priority: User Specific Dynamic Lot Size (from UI/Config)
+                if (clientConfig && clientConfig.mcxLotMargins) {
+                    const base = getMcxBaseScrip(symbol) || symbol.toUpperCase();
+                    const configLot = clientConfig.mcxLotMargins[base]?.LOT || clientConfig.mcxLotMargins[symbol.toUpperCase()]?.LOT;
+                    if (configLot && parseFloat(configLot) > 0) {
+                        lotSize = parseFloat(configLot);
+                        console.log(`[placeOrder] 🎯 MCX Dynamic Lot Size from Config: ${symbol} → ${lotSize}`);
+                    } else {
+                        // 2. Hardcoded MCX Lot Sizes
                         const baseFallback = getMcxBaseScrip(symbol);
                         if (baseFallback && MCX_LOT_SIZES[baseFallback]) {
                             lotSize = MCX_LOT_SIZES[baseFallback];
+                            console.log(`[placeOrder] 📊 MCX Lot Size (Hardcoded): ${symbol} → ${lotSize}`);
+                        } else {
+                            lotSize = 1;
                         }
                     }
-                }
-            } else {
-                // Classic flow if config missing
-                const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [symbol]);
-                if (scripRows.length > 0) {
-                    lotSize = parseFloat(scripRows[0].lot_size || 1);
-                } else if (marketType === 'MCX') {
+                } else {
+                    // Classic flow if config missing
                     const base = getMcxBaseScrip(symbol);
                     if (base && MCX_LOT_SIZES[base]) {
                         lotSize = MCX_LOT_SIZES[base];
+                        console.log(`[placeOrder] 📊 MCX Lot Size (Hardcoded): ${symbol} → ${lotSize}`);
+                    } else {
+                        lotSize = 1;
                     }
                 }
             }
-        } catch (e) { console.error('Error fetching lotSize for margin:', e); }
+            // ══════════════════════════════════════════════════════════════════
+            // EQUITY (NSE) LOT SIZE LOGIC
+            // ══════════════════════════════════════════════════════════════════
+            else if (marketType === 'EQUITY') {
+                // For Equity, check database first, default to 1 (individual shares)
+                const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [symbol]);
+                if (scripRows.length > 0) {
+                    lotSize = parseFloat(scripRows[0].lot_size) || 1;
+                    console.log(`[placeOrder] 💰 EQUITY Lot Size (from DB): ${symbol} → ${lotSize}`);
+                } else {
+                    // Default: Equity is traded in individual shares (lot size = 1)
+                    lotSize = 1;
+                    console.log(`[placeOrder] 💰 EQUITY Lot Size (default): ${symbol} → 1`);
+                }
+            }
+            // ══════════════════════════════════════════════════════════════════
+            // OTHER SEGMENTS (NFO, OPTIONS, etc.)
+            // ══════════════════════════════════════════════════════════════════
+            else {
+                const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [symbol]);
+                if (scripRows.length > 0 && parseFloat(scripRows[0].lot_size) > 0) {
+                    lotSize = parseFloat(scripRows[0].lot_size);
+                    console.log(`[placeOrder] 📋 ${marketType} Lot Size (from DB): ${symbol} → ${lotSize}`);
+                } else {
+                    lotSize = 1;
+                }
+            }
+        } catch (e) {
+            console.error('Error fetching lotSize for margin:', e);
+            lotSize = 1;
+        }
 
         // ─── CALCULATE MARGIN WITH MARGIN SERVICE (Supports both PER_LOT_BASIS and PER_TURNOVER_BASIS) ──
         let marginConfig = null;  // ✅ DECLARE OUTSIDE try-catch so it's accessible later!
@@ -1023,35 +1056,160 @@ const placeOrder = async (req, res) => {
             });
         }
 
-        // Store quantity as entered by user (no lot multiplication)
+        // ═════════════════════════════════════════════════════════════
+        // EQUITY UNITS/LOTS MODE - Calculate actual_qty based on instrument type
+        // ═════════════════════════════════════════════════════════════
+        const qtyInput = qtyNum;
+        const lotSizeAtEntry = req.body.lot_size_at_entry || lotSize || 1;
+        const equityUnitsMode = req.body.equity_units_mode || 0;
+        const instrumentType = req.body.instrument_type || '';
+
         let actualQty = qtyNum;
+        let tradeMode = 'LOTS';
+        // Get leverage from request body or client config (default 5x)
+        let leverageUsed = parseFloat(req.body.leverage_used) ||
+            parseFloat(clientConfig?.holding_leverage) || 5;
+
+        // Instrument Classification: NSE EQUITY vs Derivatives vs MCX
+        const isNseEquity = marketType === 'EQUITY' || (marketType === 'NSE' && instrumentType === 'EQ');
+        const isNseDerivative = (marketType === 'NSE' || marketType === 'NIFTY' || marketType === 'OPTIONS' || marketType === 'NFO') &&
+            ['FUT', 'CE', 'PE', 'OPT'].includes(instrumentType);
+        const isMcx = marketType === 'MCX';
+
+        console.log('[placeOrder] 📊 Equity Units Mode Calculation:', {
+            qtyInput,
+            exchange: marketType,
+            instrumentType,
+            isNseEquity,
+            isNseDerivative,
+            isMcx,
+            equityUnitsMode,
+            lotSizeAtEntry
+        });
+
+        // UNITS vs LOTS calculation
+        if (isNseEquity && equityUnitsMode === 1) {
+            // ✅ NSE EQUITY UNITS MODE: actual_qty = qty_input (1 unit = 1 share)
+            actualQty = qtyInput;
+            tradeMode = 'UNITS';
+            console.log(`[placeOrder] ✅ NSE EQUITY UNITS MODE: ${qtyInput} units = ${actualQty} shares`);
+        }
+        else if (isNseEquity && equityUnitsMode === 0) {
+            // ✅ NSE EQUITY LOTS MODE: actual_qty = qty_input × lot_size
+            actualQty = qtyInput * lotSizeAtEntry;
+            tradeMode = 'LOTS';
+            console.log(`[placeOrder] ✅ NSE EQUITY LOTS MODE: ${qtyInput} lots × ${lotSizeAtEntry} = ${actualQty} shares`);
+        }
+        else if (isNseDerivative) {
+            // ✅ NSE DERIVATIVES (FUT, CE, PE): ALWAYS LOTS, ignore units mode
+            actualQty = qtyInput * lotSizeAtEntry;
+            tradeMode = 'LOTS';
+            console.log(`[placeOrder] ✅ NSE DERIVATIVE (${instrumentType}): ${qtyInput} lots × ${lotSizeAtEntry} = ${actualQty}`);
+        }
+        else if (isMcx) {
+            // ✅ MCX: ALWAYS 1-to-1 P/L (actualQty = lots) as per previous request
+            actualQty = qtyInput;
+            tradeMode = 'LOTS';
+            console.log(`[placeOrder] ✅ MCX (1-to-1 Mode): ${qtyInput} lots = ${actualQty} units`);
+        }
+
+        // --- Segment-specific Margin Calculation Logic ---
+        let newMarginRequired = 0;
+        const finalTurnover = executionPrice * actualQty;
+
+        if (isNseEquity || isNseDerivative) {
+            // NSE/NFO: Exposure-based (Turnover / Divisor)
+            const leverage = tradeType === 'HOLDING'
+                ? parseFloat(clientConfig?.equityHoldingMargin || 100)
+                : parseFloat(clientConfig?.equityIntradayMargin || 500);
+
+            newMarginRequired = finalTurnover / (leverage || 1);
+            leverageUsed = leverage;
+            console.log(`[placeOrder] 🏦 NSE/NFO Margin: ${finalTurnover} / ${leverage} = ${newMarginRequired}`);
+        } else {
+            // Default/MCX: Use MarginService (supports Per Lot Basis)
+            newMarginRequired = MarginService.calculateRequiredMargin({
+                qty: qtyInput,
+                price: executionPrice,
+                marginConfig,
+                tradeType,
+                lotSize: lotSizeAtEntry
+            });
+            // Back-calculate leverage for logging
+            leverageUsed = finalTurnover / (newMarginRequired || 1);
+            console.log(`[placeOrder] 🪙 MCX/Other Margin: ${newMarginRequired} (approx leverage: ${leverageUsed.toFixed(1)}x)`);
+        }
+        // --------------------------------------------------
+
+        console.log('[placeOrder] 📊 Final Trade Values:', {
+            qtyInput,
+            actualQty,
+            tradeMode,
+            turnover: finalTurnover,
+            leverage: leverageUsed,
+            margin: newMarginRequired.toFixed(2)
+        });
+
+        // ─── MARGIN VALIDATION ─────────────────────────────────────────────
+        // Fetch current margin used by all OPEN trades (non-pending)
+        const [[{ totalUsedMargin }]] = await db.execute(
+            "SELECT COALESCE(SUM(margin_used), 0) as totalUsedMargin FROM trades WHERE user_id = ? AND status = 'OPEN' AND is_pending = 0",
+            [targetUserId]
+        );
+
+        const availableMargin = parseFloat(targetUser.balance) - parseFloat(totalUsedMargin);
+
+        console.log('[placeOrder] 💰 Margin Check:', {
+            ledgerBalance: targetUser.balance,
+            totalUsedMargin,
+            availableMargin,
+            requiredForThisTrade: newMarginRequired
+        });
+
+        if (availableMargin < newMarginRequired) {
+            return res.status(400).json({
+                message: `Insufficient margin. Required: ₹${newMarginRequired.toFixed(2)}, Available: ₹${availableMargin.toFixed(2)}`,
+                required: newMarginRequired.toFixed(2),
+                available: availableMargin.toFixed(2),
+                shortfall: (newMarginRequired - availableMargin).toFixed(2)
+            });
+        }
+        // ───────────────────────────────────────────────────────────────────
 
         const [result] = await db.execute(
             `INSERT INTO trades
-                (user_id, symbol, type, order_type, qty, entry_price, exit_price, margin_used, is_pending, market_type, status, trade_ip, created_by, trade_type, margin_type, entry_time)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+                (user_id, symbol, type, order_type, qty, entry_price, exit_price, margin_used, is_pending, market_type, status, trade_ip, created_by, trade_type, margin_type,
+                 qty_input, actual_qty, lot_size_at_entry, trade_mode, turnover, leverage_used, equity_units_mode, entry_time)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
             [
                 targetUserId,
                 sym,
                 type.toUpperCase(),
                 order_type,
-                actualQty,
+                (isNseEquity || isNseDerivative) ? actualQty : qtyInput, // Store total units for NSE/NFO, keep lots for MCX
                 executionPrice,
                 exit_price ? parseFloat(exit_price) : null,
-                marginRequired,
+                newMarginRequired.toFixed(2),
                 is_pending ? 1 : 0,
                 marketType,
                 'OPEN',
                 tradeIp,
                 requesterId,
-                tradeType,  // ✅ NOW SAFELY AVAILABLE
-                marginConfig.exposureType  // ✅ NOW SAFELY AVAILABLE
+                tradeType,
+                marginConfig.exposureType,
+                qtyInput,
+                actualQty,
+                lotSizeAtEntry,
+                tradeMode,
+                finalTurnover.toFixed(2),
+                leverageUsed,
+                equityUnitsMode
             ]
         );
 
         // 8. Check Balance but Don't Deduct
         // (Ledger remains unchanged - margin calculation only for reference)
-        console.log(`[placeOrder] ℹ️ Margin Calculated (NOT deducted): ${marginRequired.toFixed(2)}`);
+        console.log(`[placeOrder] ℹ️ Margin Calculated (NEW FORMULA - Turnover/Leverage): ${newMarginRequired.toFixed(2)}`);
         console.log(`[placeOrder] ℹ️ Ledger Balance: ${targetUser.balance} (unchanged)`);
 
         console.log('✅ Trade Inserted:', result.insertId);
@@ -1059,13 +1217,18 @@ const placeOrder = async (req, res) => {
             message: 'Order placed successfully',
             tradeId: result.insertId,
             executionPrice,
-            marginUsed: marginRequired,
-            qtyInput: qtyNum,
-            qtyStored: actualQty
+            marginUsed: newMarginRequired.toFixed(2),
+            qtyInput,
+            actualQty,
+            tradeMode,
+            turnover: finalTurnover.toFixed(2),
+            leverage: leverageUsed,
+            equityUnitsMode
         });
 
-        // Log the trade placement
-        await logAction(requesterId, 'PLACE_ORDER', 'trades', `Placed ${type.toUpperCase()} order for ${sym} (Qty: ${actualQty}, Price: ${executionPrice}) for user #${targetUserId}`);
+        // Log the trade placement with new fields
+        await logAction(requesterId, 'PLACE_ORDER', 'trades',
+            `Placed ${type.toUpperCase()} order for ${sym} (Qty Input: ${qtyInput}, Actual Qty: ${actualQty}, Mode: ${tradeMode}, Price: ${executionPrice}) for user #${targetUserId}`);
 
 
     } catch (err) {
@@ -1256,7 +1419,7 @@ const getGroupTrades = async (req, res) => {
                 t.symbol,
                 t.type,
                 t.market_type,
-                SUM(t.qty) as total_qty,
+                SUM(COALESCE(t.actual_qty, t.qty)) as total_qty,
                 AVG(t.entry_price) as avg_price,
                 COUNT(*) as trade_count
             FROM trades t
@@ -1368,9 +1531,10 @@ const closeTrade = async (req, res) => {
         const lotSize = (scripRows.length > 0) ? parseFloat(scripRows[0].lot_size || 1) : 1;
 
         const currentPrice = exitPrice || mockEngine.getPrice(trade.symbol) || trade.entry_price;
+        const actualQuantity = trade.actual_qty || (trade.qty * lotSize);
         const validationPnl = trade.type === 'BUY'
-            ? (currentPrice - trade.entry_price) * trade.qty * lotSize
-            : (trade.entry_price - currentPrice) * trade.qty * lotSize;
+            ? (currentPrice - trade.entry_price) * actualQuantity
+            : (trade.entry_price - currentPrice) * actualQuantity;
 
         if (validationPnl > 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
             return res.status(400).json({

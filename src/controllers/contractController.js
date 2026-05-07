@@ -14,12 +14,38 @@ if (!fs.existsSync(dataDir)) {
 
 // Initialize or load excluded contracts
 let excludedContracts = [];
+
+async function initializeDefaultExclusions() {
+    try {
+        const allKite = await getAllContractsFromKite();
+        // Exclude all NSE and NFO by default, keep MCX only
+        const nseNfoSymbols = allKite
+            .filter(c => c.segment === 'NSE' || c.segment === 'NFO')
+            .map(c => c.symbol);
+
+        excludedContracts = nseNfoSymbols;
+        global.EXCLUDED_CONTRACTS = excludedContracts;
+
+        console.log(`[contractController] Default exclusions initialized: ${nseNfoSymbols.length} NSE/NFO symbols disabled, MCX enabled`);
+
+        // Save to file
+        fs.writeFileSync(EXCLUDED_FILE, JSON.stringify(excludedContracts, null, 2));
+    } catch (err) {
+        console.error('Error initializing default exclusions:', err.message);
+    }
+}
+
 function loadExcludedContracts() {
     try {
         if (fs.existsSync(EXCLUDED_FILE)) {
             const data = fs.readFileSync(EXCLUDED_FILE, 'utf8');
             excludedContracts = JSON.parse(data) || [];
-            global.EXCLUDED_CONTRACTS = excludedContracts; // Shared globally
+            global.EXCLUDED_CONTRACTS = excludedContracts;
+            console.log(`[contractController] Loaded ${excludedContracts.length} excluded contracts`);
+        } else {
+            console.log('[contractController] No exclusion file found. Will initialize defaults on first API call.');
+            excludedContracts = [];
+            global.EXCLUDED_CONTRACTS = [];
         }
     } catch (err) {
         console.error('Error loading excluded contracts:', err.message);
@@ -196,6 +222,11 @@ exports.searchContracts = async (req, res) => {
         const { q } = req.query;
         const searchTerm = (q || '').toLowerCase();
 
+        // Initialize default exclusions on first call
+        if (excludedContracts.length === 0 && !fs.existsSync(EXCLUDED_FILE)) {
+            await initializeDefaultExclusions();
+        }
+
         let kiteContracts = [];
         // Only fetch Kite contracts if authenticated, otherwise return empty for Kite part
         if (kiteService.isAuthenticated()) {
@@ -218,7 +249,7 @@ exports.searchContracts = async (req, res) => {
             name: c.name,
             segment: 'CRYPTO',
             type: 'CRYPTO',
-            isSelected: true
+            isSelected: false
         }));
 
         const forexData = marketDataService.getForexPrices().filter(f =>
@@ -228,7 +259,7 @@ exports.searchContracts = async (req, res) => {
             name: f.name,
             segment: 'FOREX',
             type: 'FOREX',
-            isSelected: true
+            isSelected: false
         }));
 
         const combined = [...kiteContracts, ...cryptoData, ...forexData];

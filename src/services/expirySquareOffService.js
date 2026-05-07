@@ -1,9 +1,6 @@
 const cron = require('node-cron');
 const db = require('../config/db');
 const { getMcxBaseScrip } = require('../utils/symbolHelper');
-const marketDataService = require('./MarketDataService');
-const kiteService = require('../utils/kiteService');
-const tradeService = require('./TradeService');
 
 /**
  * Helper to calculate brokerage based on type
@@ -29,6 +26,10 @@ const calcBrokerage = (brokerageVal, brokerageType, qty, exitPrice, entryPrice, 
 const startExpirySquareOffJob = () => {
     cron.schedule('* * * * *', async () => {
         try {
+            const marketDataService = require('./MarketDataService');
+            const kiteService = require('../utils/kiteService');
+            const tradeService = require('./TradeService');
+
             const [rules] = await db.execute('SELECT * FROM expiry_rules');
             if (!rules.length) return;
 
@@ -69,22 +70,45 @@ const startExpirySquareOffJob = () => {
                      JOIN users u ON t.user_id = u.id
                      JOIN client_settings cs ON t.user_id = cs.user_id
                      WHERE t.status = 'OPEN' AND t.is_pending = 0
-                     AND t.user_id IN (${descendantIds.join(',')})
-                     AND t.market_type = 'MCX'`
+                     AND t.user_id IN (${descendantIds.join(',')})`
                 );
 
                 for (const trade of allOpenTrades) {
                     try {
                         const userConfig = JSON.parse(trade.config_json || '{}');
-                        const base = getMcxBaseScrip(trade.symbol);
-                        const defaultHolding = 1000000;
-                        let holdingExposure = parseFloat(userConfig?.mcxHoldingMargin || defaultHolding);
+                        const mType = (trade.market_type || '').toUpperCase();
+                        const isNSE = ['NSE', 'EQUITY', 'NIFTY', 'OPTIONS', 'NFO'].includes(mType);
+                        const isMCX = mType === 'MCX';
 
-                        if (userConfig?.mcxLotMargins && userConfig.mcxLotMargins[base]?.HOLDING) {
-                            holdingExposure = parseFloat(userConfig.mcxLotMargins[base].HOLDING);
+                        if (!isNSE && !isMCX) continue; // Skip other segments for now
+
+                        let holdingMarginRequired = 0;
+
+                        if (isMCX) {
+                            // ✅ MCX LOGIC (Per-Lot)
+                            const base = getMcxBaseScrip(trade.symbol);
+                            const defaultHolding = 1000000;
+                            let holdingExposure = parseFloat(userConfig?.mcxHoldingMargin || defaultHolding);
+
+                            if (userConfig?.mcxLotMargins && userConfig.mcxLotMargins[base]?.HOLDING) {
+                                holdingExposure = parseFloat(userConfig.mcxLotMargins[base].HOLDING);
+                            } else if (userConfig?.mcxLotMargins && userConfig.mcxLotMargins[trade.symbol]?.HOLDING) {
+                                holdingExposure = parseFloat(userConfig.mcxLotMargins[trade.symbol].HOLDING);
+                            }
+
+                            holdingMarginRequired = holdingExposure * trade.qty;
+                        } 
+                        else if (isNSE) {
+                            // ✅ NSE/NFO LOGIC (Exposure-based: Turnover / Divisor)
+                            const holdingDivisor = parseFloat(userConfig?.equityHoldingMargin || 100);
+                            const qty = parseFloat(trade.actual_qty || trade.qty || 0);
+                            const entryPrice = parseFloat(trade.entry_price || 0);
+                            const turnover = entryPrice * qty;
+
+                            holdingMarginRequired = turnover / (holdingDivisor || 1);
                         }
 
-                        const holdingMarginRequired = holdingExposure * trade.qty;
+                        console.log(`[ExpirySquareOff] 📊 Checking Trade #${trade.id} (${trade.symbol}): Required: ${holdingMarginRequired.toFixed(2)}, Available: ${trade.balance}`);
 
                         // 🎯 If balance is less than required holding margin, square off
                         if (parseFloat(trade.balance) < holdingMarginRequired) {

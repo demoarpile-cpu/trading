@@ -5,7 +5,7 @@ const {
     getUsers, getUserProfile, updateStatus, deleteUser, updatePasswords, resetPassword,
     updateUser, updateClientSettings, getBrokerShares, updateBrokerShares,
     getDocuments, updateDocuments, getUserSegments, updateUserSegments, getBrokerClients,
-    resetAccount, recalculateBrokerage
+    resetAccount, recalculateBrokerage, saveWatchlist, getWatchlist
 } = require('../controllers/userController');
 const { authMiddleware, roleMiddleware, brokerPermission, brokerSharesPermission } = require('../middleware/auth');
 
@@ -37,5 +37,9 @@ router.put('/:id/documents', authMiddleware, upload.fields([
 ]), updateDocuments);
 router.get('/:id/segments', authMiddleware, getUserSegments);
 router.put('/:id/segments', authMiddleware, roleMiddleware(['SUPERADMIN', 'ADMIN']), updateUserSegments);
+
+// ─── WATCHLIST PERSISTENCE ────────────────────────────
+router.get('/me/watchlist', authMiddleware, getWatchlist);
+router.post('/me/watchlist', authMiddleware, saveWatchlist);
 
 module.exports = router;

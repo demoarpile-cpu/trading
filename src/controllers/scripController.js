@@ -1,82 +1,140 @@
 const db = require('../config/db');
 const kiteService = require('../utils/kiteService');
+const fs = require('fs');
+const path = require('path');
 
 // Cache for Kite instruments (so we don't fetch every time)
 let kiteScripCache = null;
 let kiteScripCacheTime = 0;
 const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
 
+// Load curated symbol list
+let CURATED_SYMBOLS = null;
+function loadCuratedSymbols() {
+    try {
+        const filePath = path.join(__dirname, '../data/curated-symbols.json');
+        if (fs.existsSync(filePath)) {
+            const content = fs.readFileSync(filePath, 'utf-8');
+            CURATED_SYMBOLS = JSON.parse(content);
+            console.log('✅ Curated symbols loaded successfully');
+            return true;
+        } else {
+            console.warn('⚠️ Curated symbols file not found. Using all Zerodha symbols.');
+            return false;
+        }
+    } catch (err) {
+        console.error('Error loading curated symbols:', err.message);
+        return false;
+    }
+}
+
+loadCuratedSymbols();
+
 const getAllScrips = async (req, res) => {
     try {
-        // 1. Get DB scrips (for lot_size, margin_req, status overrides)
-        const [dbRows] = await db.execute('SELECT * FROM scrip_data');
-        const dbMap = {};
-        for (const row of dbRows) dbMap[row.symbol] = row;
+        console.log('[getAllScrips] Fetching scrips from Zerodha (Pure Zerodha, curated list only)');
 
-        // 2. Try to get Kite instruments (dynamic, all symbols)
-        let kiteSymbols = [];
-        try {
-            const now = Date.now();
-            if (kiteScripCache && (now - kiteScripCacheTime) < CACHE_TTL) {
-                kiteSymbols = kiteScripCache;
-            } else if (kiteService.isAuthenticated()) {
-                const instruments = await kiteService.getInstruments();
-                // Pick unique tradingsymbols for NSE EQ + MCX FUT + NFO FUT
-                const seen = new Set();
-                kiteSymbols = instruments
-                    .filter(i => {
-                        if (i.exchange === 'NSE' && i.instrument_type === 'EQ') return true;
-                        if (i.exchange === 'MCX' && i.instrument_type === 'FUT') return true;
-                        if (i.exchange === 'NFO' && i.instrument_type === 'FUT') return true;
-                        return false;
-                    })
-                    .map(i => {
-                        // NSE EQ: use tradingsymbol (RELIANCE, TCS)
-                        // MCX/NFO FUT: use name field (GOLD, SILVER, NIFTY) — strip expiry+FUT
-                        const isEQ = i.instrument_type === 'EQ';
-                        const cleanSymbol = isEQ ? i.tradingsymbol : (i.name || i.tradingsymbol);
-                        return {
-                            symbol: cleanSymbol,
-                            name: i.name || i.tradingsymbol,
-                            exchange: i.exchange,
-                            instrument_type: i.instrument_type,
-                            lot_size: parseInt(i.lot_size) || 1,
-                        };
-                    })
-                    .filter(i => {
-                        // Deduplicate by exchange:symbol
-                        const key = `${i.exchange}:${i.symbol}`;
-                        if (seen.has(key)) return false;
-                        seen.add(key);
-                        return true;
-                    });
-                kiteScripCache = kiteSymbols;
-                kiteScripCacheTime = now;
+        // 1. Check Zerodha connection
+        if (!kiteService.isAuthenticated()) {
+            console.warn('[getAllScrips] ⚠️ Zerodha not connected - returning cached data');
+            if (kiteScripCache && kiteScripCache.length > 0) {
+                console.log(`[getAllScrips] ✅ Using cached data (${kiteScripCache.length} scrips)`);
+                return res.json(kiteScripCache);
+            } else {
+                return res.status(400).json({
+                    error: 'Zerodha not connected and no cache available. Please authenticate Zerodha.'
+                });
             }
-        } catch (kiteErr) {
         }
 
-        // 3. Merge: Kite data + DB overrides
-        if (kiteSymbols.length > 0) {
-            const result = kiteSymbols.map(k => {
-                const dbOverride = dbMap[k.symbol];
-                return {
-                    symbol: k.symbol,
-                    name: k.name,
-                    exchange: k.exchange,
-                    lot_size: dbOverride?.lot_size || k.lot_size,
-                    margin_req: dbOverride?.margin_req || 50,
-                    market_type: k.exchange === 'MCX' ? 'MCX' : k.exchange === 'NFO' ? 'NFO' : 'EQUITY',
-                    status: dbOverride?.status || 'OPEN',
-                };
+        // 2. Check cache (6 hour TTL)
+        const now = Date.now();
+        if (kiteScripCache && (now - kiteScripCacheTime) < CACHE_TTL) {
+            console.log(`[getAllScrips] ✅ Using cached data (${kiteScripCache.length} scrips, cache age: ${Math.round((now - kiteScripCacheTime) / 60000)}min)`);
+            return res.json(kiteScripCache);
+        }
+
+        // 3. Fetch fresh from Zerodha
+        console.log('[getAllScrips] 🔄 Fetching fresh data from Zerodha API...');
+        const instruments = await kiteService.getInstruments();
+
+        if (!instruments || instruments.length === 0) {
+            return res.status(400).json({
+                error: 'No instruments received from Zerodha'
             });
-            return res.json(result);
         }
 
-        // 4. Fallback: DB only (if Kite not connected)
-        res.json(dbRows);
+        // 4. Filter & process - ONLY CURATED SYMBOLS
+        const seen = new Set();
+        const scrips = instruments
+            .filter(i => {
+                // Only NSE Equity, MCX Futures, NFO Futures
+                if (!(i.exchange === 'NSE' && i.instrument_type === 'EQ') &&
+                    !(i.exchange === 'MCX' && i.instrument_type === 'FUT') &&
+                    !(i.exchange === 'NFO' && i.instrument_type === 'FUT')) {
+                    return false;
+                }
+
+                // Check if symbol is in curated list
+                if (CURATED_SYMBOLS) {
+                    const isEQ = i.instrument_type === 'EQ';
+                    const symbol = isEQ ? i.tradingsymbol : (i.name || i.tradingsymbol);
+                    const baseSymbol = symbol.replace(/\d+[A-Z]{3}\d*FUT$/i, '').trim();
+
+                    if (i.exchange === 'NSE' && CURATED_SYMBOLS.NSE && CURATED_SYMBOLS.NSE.includes(symbol)) {
+                        return true;
+                    }
+                    if (i.exchange === 'MCX' && CURATED_SYMBOLS.MCX && CURATED_SYMBOLS.MCX.includes(baseSymbol)) {
+                        return true;
+                    }
+                    if (i.exchange === 'NFO' && CURATED_SYMBOLS.NFO && CURATED_SYMBOLS.NFO.includes(baseSymbol)) {
+                        return true;
+                    }
+                    return false;
+                }
+                return true;
+            })
+            .map(i => {
+                const isEQ = i.instrument_type === 'EQ';
+                const symbol = isEQ ? i.tradingsymbol : (i.name || i.tradingsymbol);
+
+                return {
+                    symbol: symbol,
+                    name: i.name || i.tradingsymbol,
+                    exchange: i.exchange,
+                    instrument_type: i.instrument_type,
+                    lot_size: parseInt(i.lot_size) || 1,
+                    market_type: i.exchange === 'MCX' ? 'MCX' : i.exchange === 'NFO' ? 'NFO' : 'EQUITY',
+                };
+            })
+            .filter(i => {
+                // Deduplicate by exchange:symbol
+                const key = `${i.exchange}:${i.symbol}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+
+        // 5. Cache the result
+        kiteScripCache = scrips;
+        kiteScripCacheTime = now;
+
+        console.log(`[getAllScrips] ✅ Fetched ${scrips.length} curated scrips from Zerodha and cached`);
+        res.json(scrips);
+
     } catch (err) {
-        res.status(500).send('Server Error');
+        console.error('[getAllScrips] Error:', err.message);
+
+        // Fallback to cache if error occurs
+        if (kiteScripCache && kiteScripCache.length > 0) {
+            console.log(`[getAllScrips] ⚠️ Zerodha error, falling back to cache (${kiteScripCache.length} scrips)`);
+            return res.json(kiteScripCache);
+        }
+
+        res.status(500).json({
+            error: 'Failed to fetch scrips from Zerodha',
+            details: err.message
+        });
     }
 };
 
@@ -97,86 +155,46 @@ const NFO_LOT_SIZES = {
     'NIFTY': 50, 'BANKNIFTY': 50, 'FINNIFTY': 50, 'MIDCPNIFTY': 50, 'SENSEX': 10
 };
 
+// ✅ CURATED SYNC - Only sync needed scripts to database
 const syncKiteInstruments = async (req, res) => {
     try {
-        if (!kiteService.isAuthenticated()) {
-            return res.status(400).json({ error: 'Kite not connected. Please authenticate first.' });
-        }
+        const instrumentSyncService = require('../services/InstrumentSyncService');
+        const result = await instrumentSyncService.sync();
 
-        const instruments = await kiteService.getInstruments();
-
-        if (!Array.isArray(instruments) || instruments.length === 0) {
-            return res.status(400).json({ error: 'No instruments received from Kite API' });
-        }
-
-        // Filter and normalize instruments
-        const seen = new Set();
-        const toSync = instruments
-            .filter(i => {
-                if (i.exchange === 'NSE' && i.instrument_type === 'EQ') return true;
-                if (i.exchange === 'MCX' && i.instrument_type === 'FUT') return true;
-                if (i.exchange === 'NFO' && i.instrument_type === 'FUT') return true;
-                return false;
-            })
-            .map(i => {
-                const isEQ = i.instrument_type === 'EQ';
-                const symbol = isEQ ? i.tradingsymbol : (i.name || i.tradingsymbol);
-                const exchange = i.exchange;
-                const marketType = exchange === 'MCX' ? 'MCX' : exchange === 'NFO' ? 'NFO' : 'EQUITY';
-
-                // Get lot_size from hardcoded map for MCX/NFO, use 1 for NSE
-                let lotSize = 1;
-                if (exchange === 'MCX') {
-                    lotSize = MCX_LOT_SIZES[symbol] || parseInt(i.lot_size) || 1;
-                } else if (exchange === 'NFO') {
-                    lotSize = NFO_LOT_SIZES[symbol] || parseInt(i.lot_size) || 1;
-                }
-
-                return { symbol, lot_size: lotSize, exchange, market_type: marketType };
-            })
-            .filter(i => {
-                const key = `${i.exchange}:${i.symbol}`;
-                if (seen.has(key)) return false;
-                seen.add(key);
-                return true;
+        if (result.success) {
+            res.json({
+                success: true,
+                message: `✅ Sync complete: ${result.count} scripts saved to database`,
+                note: '🧹 Old scripts deleted. Database now contains only necessary scripts from Market Groups.',
+                count: result.count
             });
-
-        // Upsert into scrip_data table
-        let syncCount = 0;
-        for (const item of toSync) {
-            try {
-                await db.execute(
-                    `INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type)
-                     VALUES (?, ?, ?, ?)
-                     ON DUPLICATE KEY UPDATE lot_size = VALUES(lot_size), market_type = VALUES(market_type)`,
-                    [item.symbol, item.lot_size, 50, item.market_type]
-                );
-                syncCount++;
-            } catch (err) {
-            }
+        } else {
+            res.status(400).json({ error: result.error });
         }
-
-        res.json({
-            success: true,
-            message: `Successfully synced ${syncCount} instruments`,
-            count: syncCount
-        });
     } catch (err) {
+        console.error('[syncKiteInstruments] Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 };
 
+// ℹ️ OPTIONAL: Manual override (admin only, not needed with pure Zerodha)
 const updateScrip = async (req, res) => {
     const { symbol, lot_size, margin_req, status } = req.body;
     try {
+        console.log(`[updateScrip] ℹ️ Updating scrip backup (${symbol}): lot_size=${lot_size}, margin=${margin_req}, status=${status}`);
+
         await db.execute(
             'UPDATE scrip_data SET lot_size = ?, margin_req = ?, status = ? WHERE symbol = ?',
             [lot_size, margin_req, status, symbol]
         );
-        res.json({ message: 'Scrip updated' });
+
+        res.json({
+            message: 'Scrip backup updated in database',
+            note: 'App still uses Zerodha API. This is for admin reference only.'
+        });
     } catch (err) {
-        console.error(err);
-        res.status(500).send('Server Error');
+        console.error('[updateScrip] Error:', err);
+        res.status(500).json({ error: err.message });
     }
 };
 

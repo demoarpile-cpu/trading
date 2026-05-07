@@ -160,8 +160,11 @@ const getClientLiveM2M = async (req, res) => {
                 }
             }
 
-            const lotSize = getMultiplier(trade.symbol, userConfig);
-            const tradeValue = entryPrice * qty * lotSize;
+            const lotSize = (mType === 'MCX') ? 1 : getMultiplier(trade.symbol, userConfig);
+            // Use actual_qty if available (total units), otherwise fall back to qty * lotSize
+            // For MCX, we always use raw qty (lots) to maintain 1-to-1 point basis
+            const totalUnits = (mType === 'MCX') ? qty : parseFloat(trade.actual_qty || (qty * lotSize));
+            const tradeValue = entryPrice * totalUnits;
 
             if (isBuy) stats.buyTurnover[segment] += tradeValue;
             else stats.sellTurnover[segment] += tradeValue;
@@ -189,8 +192,8 @@ const getClientLiveM2M = async (req, res) => {
                     : (liveData?.ask || liveData?.ltp || entryPrice);
 
                 const unrealizedPnl = isBuy
-                    ? (exitPrice - entryPrice) * qty * lotSize
-                    : (entryPrice - exitPrice) * qty * lotSize;
+                    ? (exitPrice - entryPrice) * totalUnits
+                    : (entryPrice - exitPrice) * totalUnits;
 
                 stats.profitLoss[segment] += unrealizedPnl;
 
@@ -298,28 +301,66 @@ const getMarketWatch = async (req, res) => {
 
 const getIndices = async (req, res) => {
     try {
+        const kiteService = require('../utils/kiteService');
+
         // Step 1: Try WebSocket prices (live, when market open)
         let nifty     = marketDataService.getPrice('NSE:NIFTY 50')          || {};
         let banknifty = marketDataService.getPrice('NSE:NIFTY BANK')         || {};
         let finnifty  = marketDataService.getPrice('NSE:NIFTY FIN SERVICE')  || {};
 
-        // Step 2: If WebSocket has no data (market closed), fallback to Kite REST API
-        // Kite REST returns last known closing price even when market is closed
-        if (!nifty.ltp && !banknifty.ltp && !finnifty.ltp) {
+        console.log('📊 Getting Indices - Kite Auth:', kiteService.isAuthenticated());
+        console.log('📊 WebSocket Data:', { nifty: nifty.ltp, banknifty: banknifty.ltp, finnifty: finnifty.ltp });
+
+        // Step 2: Always fetch from Kite REST API for full quote data (not just LTP)
+        if (kiteService.isAuthenticated()) {
             try {
-                const kiteService = require('../utils/kiteService');
-                if (kiteService.isAuthenticated()) {
-                    const instruments = ['NSE:NIFTY 50', 'NSE:NIFTY BANK', 'NSE:NIFTY FIN SERVICE'];
-                    const quotes = await kiteService.getKite().getLTP(instruments);
-                    if (quotes) {
-                        if (quotes['NSE:NIFTY 50'])          nifty     = { ltp: quotes['NSE:NIFTY 50'].last_price };
-                        if (quotes['NSE:NIFTY BANK'])        banknifty = { ltp: quotes['NSE:NIFTY BANK'].last_price };
-                        if (quotes['NSE:NIFTY FIN SERVICE']) finnifty  = { ltp: quotes['NSE:NIFTY FIN SERVICE'].last_price };
+                const instruments = ['NSE:NIFTY 50', 'NSE:NIFTY BANK', 'NSE:NIFTY FIN SERVICE'];
+                console.log('🔄 Fetching quotes from Zerodha Kite:', instruments);
+
+                const quotes = await kiteService.getQuote(instruments);
+                console.log('✅ Kite quotes received:', Object.keys(quotes || {}));
+
+                if (quotes && typeof quotes === 'object') {
+                    if (quotes['NSE:NIFTY 50']) {
+                        const q = quotes['NSE:NIFTY 50'];
+                        console.log('📈 NIFTY 50 Quote:', { ltp: q.last_price, bid: q.depth?.buy?.[0]?.price, ask: q.depth?.sell?.[0]?.price });
+                        nifty = {
+                            ltp: q.last_price || q.ohlc?.close || 0,
+                            bid: q.depth?.buy?.[0]?.price || q.last_price || 0,
+                            ask: q.depth?.sell?.[0]?.price || q.last_price || 0,
+                            change: q.last_price && q.ohlc?.close ? q.last_price - q.ohlc.close : 0,
+                            chg_pct: q.last_price && q.ohlc?.close ? (((q.last_price - q.ohlc.close) / q.ohlc.close) * 100).toFixed(2) : 0,
+                            ohlc: q.ohlc || {}
+                        };
+                    }
+                    if (quotes['NSE:NIFTY BANK']) {
+                        const q = quotes['NSE:NIFTY BANK'];
+                        banknifty = {
+                            ltp: q.last_price || q.ohlc?.close || 0,
+                            bid: q.depth?.buy?.[0]?.price || q.last_price || 0,
+                            ask: q.depth?.sell?.[0]?.price || q.last_price || 0,
+                            change: q.last_price && q.ohlc?.close ? q.last_price - q.ohlc.close : 0,
+                            chg_pct: q.last_price && q.ohlc?.close ? (((q.last_price - q.ohlc.close) / q.ohlc.close) * 100).toFixed(2) : 0,
+                            ohlc: q.ohlc || {}
+                        };
+                    }
+                    if (quotes['NSE:NIFTY FIN SERVICE']) {
+                        const q = quotes['NSE:NIFTY FIN SERVICE'];
+                        finnifty = {
+                            ltp: q.last_price || q.ohlc?.close || 0,
+                            bid: q.depth?.buy?.[0]?.price || q.last_price || 0,
+                            ask: q.depth?.sell?.[0]?.price || q.last_price || 0,
+                            change: q.last_price && q.ohlc?.close ? q.last_price - q.ohlc.close : 0,
+                            chg_pct: q.last_price && q.ohlc?.close ? (((q.last_price - q.ohlc.close) / q.ohlc.close) * 100).toFixed(2) : 0,
+                            ohlc: q.ohlc || {}
+                        };
                     }
                 }
             } catch (restErr) {
-                console.warn('⚠️ Indices REST fallback failed:', restErr.message);
+                console.error('🔴 Kite API Error:', restErr.message);
             }
+        } else {
+            console.warn('⚠️  Kite NOT authenticated. Check /api/kite/status');
         }
 
         const toIndex = (raw, name) => {
@@ -330,7 +371,7 @@ const getIndices = async (req, res) => {
                 bid: raw.bid || ltp,
                 ask: raw.ask || ltp,
                 change: raw.change || 0,
-                pct: raw.chg_pct || 0,
+                chg_pct: raw.chg_pct || 0,
                 high: raw.ohlc?.high || 0,
                 low:  raw.ohlc?.low  || 0,
                 open: raw.ohlc?.open || 0,
@@ -338,31 +379,42 @@ const getIndices = async (req, res) => {
             };
         };
 
-        res.json([
+        const result = [
             toIndex(nifty,     'NIFTY 50'),
-            toIndex(banknifty, 'BANK NIFTY'),
-            toIndex(finnifty,  'FINNIFTY'),
-        ]);
+            toIndex(banknifty, 'NIFTY BANK'),
+            toIndex(finnifty,  'NIFTY FIN SERVICE'),
+        ];
+
+        console.log('📊 Final Indices Response:', result.map(r => ({ name: r.name, ltp: r.ltp })));
+        res.json(result);
     } catch (err) {
-        console.error(err);
-        res.status(500).send('Server Error');
+        console.error('🔴 getIndices Error:', err.message, err.stack);
+        res.status(500).json({ error: err.message });
     }
 };
 
 const getWatchlist = async (req, res) => {
     try {
+        const [lotRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
+        const lotMap = {};
+        lotRows.forEach(r => {
+            lotMap[r.symbol.toUpperCase()] = parseFloat(r.lot_size || 1);
+        });
+
         const prices = marketDataService.prices;
         const watchlist = Object.keys(prices).map((symbol, index) => {
             const data = prices[symbol];
+            const symOnly = symbol.split(':')[1] || symbol;
             return {
                 id: (index + 1).toString(),
                 symbol: symbol,
-                name: symbol.split(':')[1] || symbol,
+                name: symOnly,
                 category: data.type || 'NSE',
                 ltp: data.ltp,
                 bid: data.bid,
                 ask: data.ask,
-                change: data.chg_pct || 0
+                change: data.chg_pct || 0,
+                lotSize: lotMap[symOnly.toUpperCase()] || 1
             };
         });
         res.json(watchlist);
