@@ -109,10 +109,6 @@ const startRolloverMarginJob = () => {
                         console.error(`[RolloverCheck] Error trade #${trade.id}:`, err.message);
                     }
                 }
-                    } catch (err) {
-                        console.error(`[RolloverCheck] Error trade #${trade.id}:`, err.message);
-                    }
-                }
             }
         } catch (err) {
             console.error('[RolloverCheck] Cron error:', err.message);

@@ -101,10 +101,6 @@ const startExpirySquareOffJob = () => {
                         console.error(`[ExpirySquareOff] Error trade #${trade.id}:`, err.message);
                     }
                 }
-                    } catch (err) {
-                        console.error(`[ExpirySquareOff] Error trade #${trade.id}:`, err.message);
-                    }
-                }
             }
         } catch (err) {
             console.error('[ExpirySquareOff] Cron error:', err.message);
