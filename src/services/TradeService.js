@@ -14,7 +14,7 @@ class TradeService {
      * Closes a single trade by its ID.
      * Reusable for manual close, auto-close, and expiry square-off.
      */
-    async closeTrade(tradeId, exitPrice = null, requesterId = 0, providedPnl = null) {
+    async closeTrade(tradeId, exitPrice = null, requesterId = 0, providedPnl = null, remark = null) {
         const connection = await db.getConnection();
         try {
             await connection.beginTransaction();
@@ -332,8 +332,8 @@ class TradeService {
             }
 
             await connection.execute(
-                'UPDATE trades SET status = "CLOSED", exit_price = ?, exit_time = NOW(), pnl = ?, brokerage = ?, swap = ?, closed_by = ? WHERE id = ?',
-                [finalExitPrice, pnl, brokerage, swap, closedByRole, tradeId]
+                'UPDATE trades SET status = "CLOSED", exit_price = ?, exit_time = NOW(), pnl = ?, brokerage = ?, swap = ?, closed_by = ?, close_remark = ? WHERE id = ?',
+                [finalExitPrice, pnl, brokerage, swap, closedByRole, remark, tradeId]
             );
 
             await connection.execute(

@@ -1,5 +1,5 @@
 const db = require('../config/db');
-const mockEngine = require('../utils/mockEngine');
+const tradeService = require('./TradeService');
 
 /**
  * Monitor Target & Stop Loss for all open trades
@@ -89,64 +89,15 @@ const monitorTargetSL = async () => {
  */
 const autoCloseTrade = async (trade, exitPrice, reason) => {
     try {
-        const INSTRUMENT_META = {
-            'GOLD': { multiplier: 100 },
-            'GOLDM': { multiplier: 10 },
-            'SILVER': { multiplier: 30 },
-            'SILVERM': { multiplier: 5 },
-            'CRUDEOIL': { multiplier: 100 },
-            'CRUDEOILM': { multiplier: 10 },
-            'COPPER': { multiplier: 2500 },
-            'COPPERM': { multiplier: 250 },
-            'NICKEL': { multiplier: 1500 },
-            'ZINC': { multiplier: 5000 },
-            'ZINCMINI': { multiplier: 1000 },
-            'LEAD': { multiplier: 5000 },
-            'LEADMINI': { multiplier: 1000 },
-            'ALUMINIUM': { multiplier: 5000 },
-            'ALUMINIUMM': { multiplier: 1000 },
-            'NATURALGAS': { multiplier: 1250 },
-            'NATURALGASM': { multiplier: 125 }
-        };
-
-        const symbol = trade.symbol.split('26')[0] || trade.symbol.split('25')[0] || trade.symbol;
-        const multiplier = INSTRUMENT_META[symbol]?.multiplier || 1;
-
-        // Calculate P/L
-        let pnl;
-        if (trade.type === 'BUY') {
-            pnl = (exitPrice - trade.entry_price) * trade.qty * multiplier;
-        } else {
-            pnl = (trade.entry_price - exitPrice) * trade.qty * multiplier;
-        }
-
-        // Fetch brokerage and swap
-        const [tradeDetails] = await db.execute(
-            'SELECT brokerage, swap FROM trades WHERE id = ?',
-            [trade.id]
-        );
-
-        const brokerage = tradeDetails[0]?.brokerage || 0;
-        const swap = tradeDetails[0]?.swap || 0;
-
-        // Calculate balance change
-        const balanceChange = pnl - brokerage - swap;
-
-        // Close the trade
-        await db.execute(
-            `UPDATE trades SET status = 'CLOSED', exit_price = ?, pnl = ?, exit_time = NOW(), closed_by = 'ADMIN' WHERE id = ?`,
-            [exitPrice, pnl, trade.id]
-        );
-
-        // Update user balance
-        await db.execute(
-            'UPDATE users SET balance = balance + ? WHERE id = ?',
-            [balanceChange, trade.user_id]
-        );
-
-        console.log(`[TargetSL] ✅ Trade #${trade.id} closed | P/L: ₹${pnl.toFixed(2)} | Reason: ${reason}`);
+        const remark = reason === 'TARGET_HIT' ? '🎯 Target Reached (Profit)' : '❌ Stop Loss Hit (Loss)';
+        
+        // Use the centralized TradeService to handle complex P/L and Brokerage logic
+        // requesterId = 0 signifies an automated/system closure
+        await tradeService.closeTrade(trade.id, exitPrice, 0, null, remark);
+        
+        console.log(`[TargetSL] ✅ Trade #${trade.id} auto-closed | Exit: ${exitPrice} | Reason: ${reason}`);
     } catch (err) {
-        console.error(`[TargetSL] Error closing trade #${trade.id}:`, err.message);
+        console.error(`[TargetSL] Error auto-closing trade #${trade.id}:`, err.message);
     }
 };
 
