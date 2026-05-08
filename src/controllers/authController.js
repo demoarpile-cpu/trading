@@ -145,6 +145,14 @@ const login = async (req, res) => {
 
 const createUser = async (req, res) => {
     const { username, password, fullName, email, mobile, role, parentId, creditLimit, city } = req.body;
+    
+    if (!username || username.trim() === '') {
+        return res.status(400).json({ message: 'Username is required' });
+    }
+    if (!password || password.trim() === '') {
+        return res.status(400).json({ message: 'Password is required' });
+    }
+
     const creatorRole = req.user.role;
     
     // Enforcement: Hierarchy Check
