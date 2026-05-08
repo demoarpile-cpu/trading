@@ -146,23 +146,58 @@ const placeOrder = async (req, res) => {
         // ─── PARSE QUANTITY AND PRICE EARLY (needed for validations) ──────────────
         const qtyNum = parseInt(qty, 10);
 
-        // Robust Live Price Fetcher (prioritize MarketDataService, then Kite API)
+        // 🚀 Robust Live Price Fetcher (prioritize MarketDataService, then direct Kite API)
         let liveMarketPrice = null;
         const marketDataService = require('../services/MarketDataService');
-        const liveData = marketDataService.getPrice(symbol) || marketDataService.getPrice(`MCX:${symbol}`);
+        const kiteService = require('../utils/kiteService');
 
-        if (liveData && liveData.ltp) {
-            liveMarketPrice = liveData.ltp;
-        } else if (require('../utils/kiteService').isAuthenticated()) {
-            try {
-                const quote = await require('../utils/kiteService').getQuote(symbol.includes(':') ? symbol : `MCX:${symbol}`);
-                liveMarketPrice = quote[Object.keys(quote)[0]]?.last_price;
-            } catch (_) { }
+        // 1. Try to get from MarketDataService with various prefixes
+        const possibleSymbols = [symbol, `MCX:${symbol}`, `NSE:${symbol}`, `NFO:${symbol}`];
+        for (const s of possibleSymbols) {
+            const liveData = marketDataService.getPrice(s);
+            if (liveData && liveData.ltp) {
+                liveMarketPrice = liveData.ltp;
+                console.log(`[placeOrder] 🎯 Price found in MarketDataService for ${s}: ${liveMarketPrice}`);
+                break;
+            }
         }
 
+        // 2. If not in stream, try DIRECT QUOTE from Kite API (for NFO/NSE/MCX)
+        if (!liveMarketPrice && kiteService.isAuthenticated()) {
+            try {
+                console.log(`[placeOrder] 📡 Price not in stream, fetching direct quote for ${symbol}...`);
+                // Try to find the correct exchange prefix if not provided
+                let kiteSymbol = symbol;
+                if (!symbol.includes(':')) {
+                    if (marketType === 'MCX') kiteSymbol = `MCX:${symbol}`;
+                    else if (marketType === 'EQUITY') kiteSymbol = `NSE:${symbol}`;
+                    else if (marketType === 'OPTIONS' || marketType === 'NFO') kiteSymbol = `NFO:${symbol}`;
+                }
+                
+                const quote = await kiteService.getQuote(kiteSymbol);
+                const instrumentKey = Object.keys(quote)[0];
+                if (quote[instrumentKey] && quote[instrumentKey].last_price) {
+                    liveMarketPrice = quote[instrumentKey].last_price;
+                    console.log(`[placeOrder] ✅ Direct Kite Quote for ${kiteSymbol}: ${liveMarketPrice}`);
+                    
+                    // Also feed this back to MarketDataService for others
+                    marketDataService.prices[kiteSymbol] = { 
+                        ...marketDataService.prices[kiteSymbol], 
+                        ltp: liveMarketPrice, 
+                        symbol: kiteSymbol 
+                    };
+                }
+            } catch (kiteErr) {
+                console.warn(`[placeOrder] ⚠️ Kite Quote Failed for ${symbol}:`, kiteErr.message);
+            }
+        }
+
+        // 3. Last Resort: Mock Engine (ONLY if still null)
         if (!liveMarketPrice) {
             liveMarketPrice = mockEngine.getPrice(symbol);
-            console.log(`[placeOrder] ℹ️ Live price unavailable, using Mock Engine: ${liveMarketPrice}`);
+            if (liveMarketPrice) {
+                console.log(`[placeOrder] ℹ️ Using Mock Engine fallback for ${symbol}: ${liveMarketPrice}`);
+            }
         }
 
         const executionPrice = price ? parseFloat(price) : (order_type === 'MARKET' ? liveMarketPrice : 0);
@@ -1107,10 +1142,10 @@ const placeOrder = async (req, res) => {
             console.log(`[placeOrder] ✅ NSE DERIVATIVE (${instrumentType}): ${qtyInput} lots × ${lotSizeAtEntry} = ${actualQty}`);
         }
         else if (isMcx) {
-            // ✅ MCX: ALWAYS 1-to-1 P/L (actualQty = lots) as per previous request
-            actualQty = qtyInput;
+            // ✅ MCX: actual_qty = qty_input × lot_size (standard lot-based calculation)
+            actualQty = qtyInput * lotSizeAtEntry;
             tradeMode = 'LOTS';
-            console.log(`[placeOrder] ✅ MCX (1-to-1 Mode): ${qtyInput} lots = ${actualQty} units`);
+            console.log(`[placeOrder] ✅ MCX LOTS MODE: ${qtyInput} lots × ${lotSizeAtEntry} = ${actualQty}`);
         }
 
         // --- Segment-specific Margin Calculation Logic ---
@@ -1530,7 +1565,22 @@ const closeTrade = async (req, res) => {
         const [scripRows] = await db.execute('SELECT lot_size FROM scrip_data WHERE symbol = ?', [trade.symbol]);
         const lotSize = (scripRows.length > 0) ? parseFloat(scripRows[0].lot_size || 1) : 1;
 
-        const currentPrice = exitPrice || mockEngine.getPrice(trade.symbol) || trade.entry_price;
+        const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
+        const marketTypeForClose = (trade.market_type || 'MCX').toUpperCase();
+        const prefixForClose = marketTypeForClose === 'EQUITY' ? 'NSE' : (marketTypeForClose === 'OPTIONS' ? 'NFO' : marketTypeForClose);
+        
+        let livePriceForClose = null;
+        const possibleSymbolsForClose = [trade.symbol, `${prefixForClose}:${cleanSymbol}`, cleanSymbol];
+        const marketDataService = require('../services/MarketDataService');
+        for (const s of possibleSymbolsForClose) {
+            const data = marketDataService.getPrice(s);
+            if (data && data.ltp) {
+                livePriceForClose = data.ltp;
+                break;
+            }
+        }
+
+        const currentPrice = exitPrice || livePriceForClose || trade.entry_price;
         const actualQuantity = trade.actual_qty || (trade.qty * lotSize);
         const validationPnl = trade.type === 'BUY'
             ? (currentPrice - trade.entry_price) * actualQuantity

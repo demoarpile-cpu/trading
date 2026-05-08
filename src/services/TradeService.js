@@ -3,6 +3,7 @@ const mockEngine = require('../utils/mockEngine');
 const { logAction } = require('../controllers/systemController');
 const { invalidateCache } = require('../utils/cacheManager');
 const kiteService = require('../utils/kiteService');
+const { getLotSize } = require('../utils/symbolHelper');
 
 /**
  * Service to handle core Trade operations like closing and auto-squaring off.
@@ -57,22 +58,8 @@ class TradeService {
             // MCX LOT SIZE (100% Complete - DO NOT MODIFY)
             // ══════════════════════════════════════════════════════════════════
             if (mType === 'MCX') {
-                const MCX_LOT_SIZES = {
-                    'CRUDEOIL': 100, 'NATURALGAS': 1250, 'GOLD': 100, 'GOLDM': 10,
-                    'SILVER': 30, 'SILVERM': 5, 'COPPER': 2500, 'ZINC': 5000,
-                    'NICKEL': 1500, 'LEAD': 5000, 'ALUMINIUM': 5000, 'MENTHAOIL': 360,
-                    'COTTON': 25, 'BULLDEX': 1, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
-                    'ZINCMINI': 1000, 'LEADMINI': 1000, 'NICKELMINI': 100, 'ALUMINI': 1000,
-                    'CRUDEOILM': 10, 'NATGASMINI': 250, 'SILVERMIC': 1
-                };
-
-                const baseSymbol = Object.keys(MCX_LOT_SIZES).find(key => trade.symbol.toUpperCase().includes(key));
-                if (baseSymbol && MCX_LOT_SIZES[baseSymbol]) {
-                    lotSize = MCX_LOT_SIZES[baseSymbol];
-                    console.log(`[TradeService] MCX Lot Size: ${trade.symbol} → ${lotSize}`);
-                } else {
-                    lotSize = 1;
-                }
+                lotSize = getLotSize(trade.symbol, 'MCX');
+                console.log(`[TradeService] MCX Lot Size: ${trade.symbol} → ${lotSize}`);
             }
             // ══════════════════════════════════════════════════════════════════
             // EQUITY (NSE) LOT SIZE
@@ -155,10 +142,10 @@ class TradeService {
                     }
                 }
 
-                // 🎯 3. Final Fallback (Mock or Entry)
+                // 🎯 3. Final Fallback (Entry Price)
                 if (!finalExitPrice || finalExitPrice <= 0) {
-                    finalExitPrice = mockEngine.getPrice(base) || trade.entry_price;
-                    console.log(`[TradeService] Using Fallback Price: ${finalExitPrice}`);
+                    finalExitPrice = trade.entry_price;
+                    console.log(`[TradeService] Using Entry Price as Fallback: ${finalExitPrice}`);
                 }
             }
 
@@ -169,12 +156,12 @@ class TradeService {
                 pnl = parseFloat(providedPnl);
                 console.log(`[TradeService] Using provided P/L: ${pnl}`);
             } else {
-                // Use actual_qty if available (new trades with units/lots), fallback to calculated qty
-                const qtyForPnl = trade.actual_qty || (trade.qty * lotSize);
+                // 🎯 FIXED: Always use (qty * lotSize) for consistent P/L across all segments
+                const qtyForPnl = trade.qty * lotSize;
                 pnl = trade.type === 'BUY'
                     ? (finalExitPrice - trade.entry_price) * qtyForPnl
                     : (trade.entry_price - finalExitPrice) * qtyForPnl;
-                console.log(`[TradeService] Calculated P/L using ${trade.actual_qty ? 'actual_qty' : 'qty×lotSize'}: ${pnl}`);
+                console.log(`[TradeService] Calculated P/L using qty×lotSize (${trade.qty}×${lotSize}): ${pnl}`);
             }
 
             // 4. Calculate Brokerage & Swap
@@ -223,7 +210,7 @@ class TradeService {
                         scripRate = parseFloat(lotBrokerageMap[cleanSymbol]);
                     } else {
                         // 2. Try to find if any key in map is a prefix or part of cleanSymbol
-                        // Sort keys by length descending to match longest first (e.g., NATURALGAS MINI before NATURALGAS)
+                        // Sort keys by length descending to match longest first
                         const sortedKeys = Object.keys(lotBrokerageMap).sort((a, b) => b.length - a.length);
                         for (const key of sortedKeys) {
                             if (cleanSymbol.startsWith(key.toUpperCase().replace(/\s+/g, ''))) {
@@ -233,7 +220,6 @@ class TradeService {
                         }
                     }
                 }
-                // If per_crore mode, skip scrip-specific lookup and use general rate in fallback
             } else if (mType === 'EQUITY') {
                 const equityMap = clientConfig.brokerEquityBrokerage || {};
                 if (equityMap[cleanSymbol] !== undefined) {
@@ -251,10 +237,10 @@ class TradeService {
 
             if (scripRate !== undefined && scripRate > 0) {
                 // Priority 1: Scrip-specific from config
-                // Use actual_qty if available (new trades), fallback to qty
-                const qtyForBrokerage = trade.actual_qty || trade.qty;
-                brokerage = qtyForBrokerage * scripRate;
-                console.log(`[TradeService] Scrip-specific Brokerage: Raw=${rawSymbol}, Clean=${cleanSymbol}, Rate=${scripRate}, Qty=${qtyForBrokerage}, Calculated=${brokerage.toFixed(2)}`);
+                // Always use (qty * lotSize) for lot-based scripts
+                const qtyForBrokerage = trade.qty * lotSize;
+                brokerage = (trade.qty) * scripRate; // For per-lot, we just use number of lots
+                console.log(`[TradeService] Scrip-specific Brokerage: Raw=${rawSymbol}, Clean=${cleanSymbol}, Rate=${scripRate}, Lots=${trade.qty}, Calculated=${brokerage.toFixed(2)}`);
             } else {
                 // Priority 2: Segment Settings from user_segments
                 const [segmentRows] = await connection.execute(
@@ -264,15 +250,22 @@ class TradeService {
 
                 if (segmentRows.length > 0 && parseFloat(segmentRows[0].brokerage_value) > 0) {
                     const seg = segmentRows[0];
-                    // Use actual_qty if available (includes lot multiplication already), otherwise use qty×lotSize
-                    const qtyForBrokerageCalc = trade.actual_qty || trade.qty;
-                    const multiplierForBrokerage = trade.actual_qty ? 1 : lotSize;
-                    brokerage = calcBrokerage(seg.brokerage_value, seg.brokerage_type, qtyForBrokerageCalc, finalExitPrice, trade.entry_price, multiplierForBrokerage);
-                    console.log(`[TradeService] Segment ${trade.market_type} Brokerage: Rate=${seg.brokerage_value}, Type=${seg.brokerage_type}, Qty=${qtyForBrokerageCalc}, Calculated=${brokerage.toFixed(2)}`);
+                    // 🎯 FIXED: Always use trade.qty and lotSize multiplier for consistency
+                    const qtyForBrokerageCalc = trade.qty;
+                    const multiplierForBrokerage = lotSize;
+
+                    // NSE and NFO segments must always use PER_CRORE calculation
+                    let forcedType = (seg.brokerage_type || 'PER_LOT').toUpperCase();
+                    if (mType === 'EQUITY' || mType === 'NFO' || mType === 'OPTIONS') {
+                        forcedType = 'PER_CRORE';
+                    }
+
+                    brokerage = calcBrokerage(seg.brokerage_value, forcedType, qtyForBrokerageCalc, finalExitPrice, trade.entry_price, multiplierForBrokerage);
+                    console.log(`[TradeService] Segment ${trade.market_type} Brokerage: Rate=${seg.brokerage_value}, Type=${forcedType} (Forced if NSE/NFO), Lots=${qtyForBrokerageCalc}, Mult=${multiplierForBrokerage}, Calculated=${brokerage.toFixed(2)}`);
                 } else {
                     // Priority 3: General Fallback from client_settings
-                    const qtyForClientBrokerage = trade.actual_qty || trade.qty;
-                    const multiplierForClientBrokerage = trade.actual_qty ? 1 : lotSize;
+                    const qtyForClientBrokerage = trade.qty;
+                    const multiplierForClientBrokerage = lotSize;
 
                     if (mType === 'MCX') {
                         const brokerageType = (clientConfig.mcxBrokerageType || 'per_crore').toLowerCase();
@@ -282,7 +275,8 @@ class TradeService {
                         brokerage = calcBrokerage(rate, calcType, qtyForClientBrokerage, finalExitPrice, trade.entry_price, multiplierForClientBrokerage);
                     } else if (mType === 'EQUITY') {
                         const rate = parseFloat(clientConfig.brokerEquityBrokerage || clientConfig.equityBrokerage || 0);
-                        brokerage = calcBrokerage(rate, 'PER_LOT', qtyForClientBrokerage, finalExitPrice, trade.entry_price, multiplierForClientBrokerage);
+                        // NSE Equity must always use PER_CRORE
+                        brokerage = calcBrokerage(rate, 'PER_CRORE', qtyForClientBrokerage, finalExitPrice, trade.entry_price, multiplierForClientBrokerage);
                     } else if (mType === 'OPTIONS') {
                         let rate = 0;
                         if (cleanSymbol.includes('NIFTY') || cleanSymbol.includes('BANKNIFTY')) {
@@ -292,7 +286,8 @@ class TradeService {
                         } else {
                             rate = parseFloat(clientConfig.brokerOptionsEquityBrokerage || clientConfig.optionsEquityBrokerage || 20);
                         }
-                        brokerage = qtyForClientBrokerage * rate;
+                        // NFO Options must always use PER_CRORE as per user request
+                        brokerage = calcBrokerage(rate, 'PER_CRORE', qtyForClientBrokerage, finalExitPrice, trade.entry_price, multiplierForClientBrokerage);
                     } else if (mType === 'COMEX') {
                         const rate = parseFloat(clientConfig.comexBrokerage || 0);
                         brokerage = calcBrokerage(rate, 'PER_LOT', qtyForClientBrokerage, finalExitPrice, trade.entry_price, multiplierForClientBrokerage);

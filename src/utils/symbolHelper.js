@@ -17,7 +17,7 @@ const getMcxBaseScrip = (symbol) => {
         'NICKELMINI', 'NICKEL',
         'ALUMINI', 'ALUMINIUM',
         'MENTHAOIL', 'COTTONCNDY', 'COTTON',
-        'MCXBULLDEX'
+        'MCXBULLDEX', 'BULLDEX'
     ];
 
     for (const base of mcxBases) {
@@ -26,4 +26,29 @@ const getMcxBaseScrip = (symbol) => {
     return '';
 };
 
-module.exports = { getMcxBaseScrip };
+/**
+ * Static Lot Sizes for MCX
+ */
+const MCX_LOT_SIZES = {
+    'CRUDEOIL': 100, 'NATURALGAS': 1250, 'GOLD': 100, 'GOLDM': 10,
+    'SILVER': 30, 'SILVERM': 5, 'COPPER': 2500, 'ZINC': 5000,
+    'NICKEL': 1500, 'LEAD': 5000, 'ALUMINIUM': 5000, 'MENTHAOIL': 360,
+    'COTTON': 25, 'BULLDEX': 1, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
+    'ZINCMINI': 1000, 'LEADMINI': 1000, 'NICKELMINI': 100, 'ALUMINI': 1000,
+    'CRUDEOILM': 10, 'NATGASMINI': 250, 'SILVERMIC': 1
+};
+
+/**
+ * Gets lot size for a symbol based on market type
+ */
+const getLotSize = (symbol, marketType) => {
+    const mType = (marketType || '').toUpperCase();
+    if (mType === 'MCX') {
+        const base = getMcxBaseScrip(symbol);
+        return MCX_LOT_SIZES[base] || 1;
+    }
+    // For other segments, default to 1 (should be fetched from DB if needed)
+    return 1;
+};
+
+module.exports = { getMcxBaseScrip, getLotSize, MCX_LOT_SIZES };

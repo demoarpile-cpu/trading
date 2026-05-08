@@ -2,6 +2,7 @@ const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 const { logAction } = require('./systemController');
 const { getFromCache, saveToCache, invalidateCache } = require('../utils/cacheManager');
+const { getLotSize } = require('../utils/symbolHelper');
 
 const { uploadFile, deleteFile } = require('../utils/imagekit');
 
@@ -770,7 +771,8 @@ const recalculateBrokerage = async (req, res) => {
                 if (type === 'PER_LOT' || type === 'PER LOT') {
                     brokerage = trade.qty * rate;
                 } else if (type === 'PER_CRORE' || type === 'PER CRORE') {
-                    const turnover = (parseFloat(trade.entry_price) + parseFloat(trade.exit_price || 0)) * trade.qty;
+                    const lotSize = getLotSize(trade.symbol, trade.market_type || 'MCX');
+                    const turnover = (parseFloat(trade.entry_price) + parseFloat(trade.exit_price || 0)) * trade.qty * lotSize;
                     brokerage = (turnover / 10000000) * rate;
                 } else {
                     brokerage = trade.qty * rate;
@@ -798,7 +800,8 @@ const recalculateBrokerage = async (req, res) => {
                     if (brokerageType === 'per_lot') {
                         brokerage = trade.qty * brokeragePerLot;
                     } else {
-                        const turnover = trade.qty * (parseFloat(trade.entry_price) + parseFloat(trade.exit_price || 0));
+                        const lotSize = getLotSize(trade.symbol, 'MCX');
+                        const turnover = trade.qty * lotSize * (parseFloat(trade.entry_price) + parseFloat(trade.exit_price || 0));
                         brokerage = (turnover / 10000000) * brokeragePerLot;
                     }
                 }

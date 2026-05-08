@@ -35,17 +35,21 @@ class MockMarketEngine extends EventEmitter {
             return this.prices[symbol];
         }
 
-        // ✅ If not found, try extracting base symbol (e.g., "GOLD26JUN" → "GOLD")
-        const baseSymbol = symbol.replace(/\d+[A-Z]*$/g, '').trim(); // Remove date suffixes like "26JUN"
-        if (baseSymbol && baseSymbol !== symbol && this.prices[baseSymbol]) {
-            console.log(`[MockEngine] 📌 Symbol "${symbol}" → using base "${baseSymbol}" price ₹${this.prices[baseSymbol]}`);
-            return this.prices[baseSymbol];
+        // ✅ Create a list of allowed base symbols to prevent option-to-index mapping
+        const allowedBases = ['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'NIFTY', 'BANKNIFTY'];
+        const baseSymbol = symbol.replace(/\d+[A-Z]*$/g, '').trim(); 
+        
+        if (baseSymbol && baseSymbol !== symbol && allowedBases.includes(baseSymbol) && this.prices[baseSymbol]) {
+            // ONLY use base price if it's NOT an option (options shouldn't use index price)
+            if (!symbol.includes('CE') && !symbol.includes('PE')) {
+                console.log(`[MockEngine] 📌 Symbol "${symbol}" → using base "${baseSymbol}" price ₹${this.prices[baseSymbol]}`);
+                return this.prices[baseSymbol];
+            }
         }
 
-        // ✅ If still not found, create a mock price for the symbol
-        const basePrice = (Math.random() * 2000) + 100; // randomish start
-        this.prices[symbol] = parseFloat(basePrice.toFixed(2));
-        return this.prices[symbol];
+        // ✅ Fallback: Return null if price is unknown. 
+        // DO NOT generate random prices as it causes dangerous jumps in trading.
+        return null;
     }
 }
 

@@ -132,6 +132,10 @@ class MarketDataService extends EventEmitter {
                     }
                 }
             });
+
+            // ✅ REMOVED MOCK FLUCTUATOR - Only broadcast real API updates
+            // This ensures data integrity and prevents price jumps from real-to-mock.
+
             this.dirtySymbols.clear();
 
             const io = socketManager.getIo();

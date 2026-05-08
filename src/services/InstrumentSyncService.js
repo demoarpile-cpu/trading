@@ -69,39 +69,35 @@ class InstrumentSyncService {
 
             for (const i of instruments) {
                 const symbol = i.tradingsymbol.toUpperCase();
-                const baseName = (i.name || symbol).toUpperCase();
-                
-                // Check if this instrument belongs to one of our base symbols
-                // We check if symbol matches exactly (NSE EQ) or starts with base (NFO/MCX FUT/OPT)
-                let isMatch = false;
+                const exchange = i.exchange;
+                const fullKey = `${exchange}:${symbol}`;
+
+                // STRICT MATCHING: Only sync what is explicitly in our market groups
+                if (!baseSymbols.has(symbol) && !baseSymbols.has(fullKey)) continue;
+
                 let marketType = 'OTHER';
+                if (exchange === 'NSE') marketType = 'NSE';
+                else if (exchange === 'NFO') marketType = 'NFO';
+                else if (exchange === 'MCX') marketType = 'MCX';
 
-                if (i.exchange === 'NSE' && i.instrument_type === 'EQ' && baseSymbols.has(symbol)) {
-                    isMatch = true;
-                    marketType = 'EQUITY';
-                } else if (i.exchange === 'NFO' && (baseSymbols.has(baseName) || baseSymbols.has(symbol.replace(/\d+[A-Z]{3}.*$/, '')))) {
-                    isMatch = true;
-                    marketType = 'NFO';
-                } else if (i.exchange === 'MCX' && (baseSymbols.has(baseName) || baseSymbols.has(symbol.replace(/\d+[A-Z]{3}.*$/, '')))) {
-                    isMatch = true;
-                    marketType = 'MCX';
+                const key = `${exchange}:${symbol}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+
+                let lotSize = parseInt(i.lot_size) || 1;
+                // MCX Special Lot Size Handling
+                if (exchange === 'MCX') {
+                    const baseName = (i.name || symbol).toUpperCase();
+                    lotSize = MCX_LOT_SIZES[baseName] || lotSize;
                 }
 
-                if (isMatch) {
-                    const key = `${i.exchange}:${symbol}`;
-                    if (seen.has(key)) continue;
-                    seen.add(key);
-
-                    let lotSize = parseInt(i.lot_size) || 1;
-                    if (i.exchange === 'MCX') lotSize = MCX_LOT_SIZES[baseName] || lotSize;
-
-                    toSync.push({
-                        symbol: symbol,
-                        lot_size: lotSize,
-                        market_type: marketType,
-                        exchange: i.exchange
-                    });
-                }
+                toSync.push({
+                    symbol: symbol,
+                    lot_size: lotSize,
+                    market_type: marketType,
+                    exchange: exchange,
+                    expiry: i.expiry
+                });
             }
 
             console.log(`🔍 [InstrumentSyncService] Found ${toSync.length} relevant instruments to sync`);
@@ -119,10 +115,10 @@ class InstrumentSyncService {
                 const batchSize = 100;
                 for (let i = 0; i < toSync.length; i += batchSize) {
                     const batch = toSync.slice(i, i + batchSize);
-                    const values = batch.map(item => [item.symbol, item.lot_size, 50, item.market_type]);
+                    const values = batch.map(item => [item.symbol, item.lot_size, 50, item.market_type, item.expiry]);
                     
                     await connection.query(
-                        'INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type) VALUES ?',
+                        'INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type, expiry_date) VALUES ?',
                         [values]
                     );
                 }

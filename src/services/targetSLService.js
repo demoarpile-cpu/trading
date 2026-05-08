@@ -24,8 +24,23 @@ const monitorTargetSL = async () => {
 
         for (const trade of trades) {
             try {
-                // Get current live price
-                let currentPrice = mockEngine.getPrice(trade.symbol) || trade.entry_price;
+                // Get current live price from MarketDataService
+                const marketDataService = require('./MarketDataService');
+                const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
+                const marketType = (trade.market_type || 'MCX').toUpperCase();
+                const prefix = marketType === 'EQUITY' ? 'NSE' : (marketType === 'OPTIONS' ? 'NFO' : marketType);
+                
+                let livePrice = null;
+                const possibleSymbols = [trade.symbol, `${prefix}:${cleanSymbol}`, cleanSymbol];
+                for (const s of possibleSymbols) {
+                    const data = marketDataService.getPrice(s);
+                    if (data && data.ltp) {
+                        livePrice = data.ltp;
+                        break;
+                    }
+                }
+
+                let currentPrice = livePrice || trade.entry_price;
 
                 // Check TARGET HIT (Profit scenario)
                 if (trade.target_price) {

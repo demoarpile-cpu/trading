@@ -976,11 +976,7 @@ async function _buildWatchlistData(query, userId) {
 
     const getLotSize = (key) => {
         const sym = key.includes(':') ? key.split(':')[1] : key;
-        const ls = lotMap[sym.toUpperCase()] || 1;
-        if (sym.includes('NIFTY')) {
-            console.log(`🔍 Lot size for ${sym}: ${ls}`);
-        }
-        return ls;
+        return lotMap[sym.toUpperCase()] || 1;
     };
 
     // ── Step 6: Build all rows ──
@@ -1737,6 +1733,33 @@ router.get('/quote/ltp', authMiddleware, asyncHandler(async (req, res) => {
 router.get('/instruments', authMiddleware, asyncHandler(async (req, res) => {
     const data = await kiteService.getInstruments();
     res.json(data);
+}));
+
+router.get('/instruments/search', authMiddleware, asyncHandler(async (req, res) => {
+    const { q } = req.query;
+    if (!q || q.length < 2) return res.json([]);
+    const instruments = await getInstrumentsFromCache();
+    const query = q.toUpperCase();
+    const results = instruments.filter(i => 
+        (i.tradingsymbol || '').toUpperCase().includes(query) || 
+        (i.name || '').toUpperCase().includes(query)
+    ).slice(0, 100);
+    res.json(results.map(i => ({
+        exchange: i.exchange,
+        symbol: i.tradingsymbol,
+        name: i.name,
+        type: i.instrument_type,
+        expiry: i.expiry,
+        instrument_token: i.instrument_token
+    })));
+}));
+
+router.get('/sync-instruments', authMiddleware, asyncHandler(async (req, res) => {
+    const InstrumentSyncService = require('../services/InstrumentSyncService');
+    const result = await InstrumentSyncService.sync();
+    // Clear lot size cache after sync
+    global.LOT_SIZE_CACHE = null;
+    res.json({ success: true, count: result.count });
 }));
 
 router.get('/instruments/historical/:instrumentToken/:interval', authMiddleware, asyncHandler(async (req, res) => {

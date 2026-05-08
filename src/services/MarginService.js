@@ -135,12 +135,12 @@ class MarginService {
         throw new Error(`${exposureField} not configured for this symbol`);
       }
 
-      // ⚠️ IMPORTANT: For PER_TURNOVER_BASIS, turnover = price × qty
-      // Don't multiply by lotSize separately - it's included in price
-      const turnover = priceNum * qtyNum;
+      // 🎯 FIXED: For PER_TURNOVER_BASIS, turnover = price × qty × lotSize
+      // lotSize is critical for MCX (e.g. Crude Oil lot is 100)
+      const turnover = priceNum * qtyNum * (lotSize || 1);
       const requiredMargin = turnover / exposure;
 
-      console.log(`[MarginService] ✅ PER_TURNOVER_BASIS (${tradeType}): (₹${priceNum} × ${qtyNum}) / ${exposure} = ₹${requiredMargin.toFixed(2)}`);
+      console.log(`[MarginService] ✅ PER_TURNOVER_BASIS (${tradeType}): (₹${priceNum} × ${qtyNum} × ${lotSize}) / ${exposure} = ₹${requiredMargin.toFixed(2)}`);
       return requiredMargin;
     }
 

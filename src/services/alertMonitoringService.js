@@ -86,16 +86,7 @@ const monitorPriceAlerts = async () => {
                     }
                 }
 
-                // Last resort: mockEngine (real price not available)
-                if (!currentPrice) {
-                    const mockPrice = mockEngine.getPrice(normalizedSym) || mockEngine.getPrice(baseSym);
-                    // Only use mock if it looks like a realistic price (not a random tiny float)
-                    if (mockPrice && typeof mockPrice === 'number' && mockPrice > 0) {
-                        currentPrice = mockPrice;
-                    }
-                }
-
-                // Skip if no price available
+                // ✅ Skip if no real price available (removed mock fallback to prevent fake alerts)
                 if (!currentPrice || currentPrice === undefined) {
                     continue;
                 }
