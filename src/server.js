@@ -155,6 +155,7 @@ runMigrations()
         const { startTargetSLMonitoring } = require('./services/targetSLService');
         const { startAlertMonitoring } = require('./services/alertMonitoringService');
         const { startMarketCloseSquareOffJob } = require('./services/MarketCloseSquareOffService');
+        const { startPendingOrderMonitoring } = require('./services/PendingOrderService'); // ✅ New Service
 
         startExpirySquareOffJob();
         startRolloverMarginJob();
@@ -162,6 +163,7 @@ runMigrations()
         rmsService.start(10000); // Check risk every 10 seconds
         startTargetSLMonitoring(); // Monitor target/SL every 5 seconds
         startAlertMonitoring(); // Monitor price alerts every 3 seconds
+        startPendingOrderMonitoring(); // ✅ Monitor pending orders every 3 seconds
 
         // Initialize Market Data (Real Data Only - No Mock Fallback)
         try {

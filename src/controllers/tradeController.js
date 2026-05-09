@@ -147,6 +147,7 @@ const placeOrder = async (req, res) => {
         const qtyNum = parseInt(qty, 10);
 
         // 🚀 Robust Live Price Fetcher (prioritize MarketDataService, then direct Kite API)
+        // 🚀 Robust Live Price Fetcher (prioritize MarketDataService, then direct Kite API)
         let liveMarketPrice = null;
         const marketDataService = require('../services/MarketDataService');
         const kiteService = require('../utils/kiteService');
