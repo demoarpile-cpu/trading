@@ -1736,14 +1736,16 @@ router.get('/instruments', authMiddleware, asyncHandler(async (req, res) => {
 }));
 
 router.get('/instruments/search', authMiddleware, asyncHandler(async (req, res) => {
-    const { q } = req.query;
-    if (!q || q.length < 2) return res.json([]);
+    const { q, exchange } = req.query;
+    if (!q || q.length < 1) return res.json([]);
     const instruments = await getInstrumentsFromCache();
     const query = q.toUpperCase();
-    const results = instruments.filter(i => 
-        (i.tradingsymbol || '').toUpperCase().includes(query) || 
-        (i.name || '').toUpperCase().includes(query)
-    ).slice(0, 100);
+    let results = instruments.filter(i => {
+        const matchesQuery = (i.tradingsymbol || '').toUpperCase().includes(query) ||
+                             (i.name || '').toUpperCase().includes(query);
+        const matchesExchange = !exchange || i.exchange === exchange;
+        return matchesQuery && matchesExchange;
+    }).slice(0, 100);
     res.json(results.map(i => ({
         exchange: i.exchange,
         symbol: i.tradingsymbol,
