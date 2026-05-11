@@ -7,9 +7,16 @@ const getRequests = async (req, res) => {
     const { type, status } = req.query; // type: DEPOSIT/WITHDRAW, status: PENDING
     try {
         let query = `
-            SELECT r.*, u.username, u.full_name, u.balance as current_balance
+            SELECT r.*, u.username, u.full_name, u.email, u.mobile, u.role as account_type, u.balance as current_balance,
+                   IFNULL(ud.kyc_status, 'PENDING') as kyc_status,
+                   b.full_name as broker_name,
+                   adm.full_name as processed_by
             FROM payment_requests r 
             JOIN users u ON r.user_id = u.id
+            LEFT JOIN user_documents ud ON u.id = ud.user_id
+            LEFT JOIN client_settings cs ON u.id = cs.user_id
+            LEFT JOIN users b ON cs.broker_id = b.id
+            LEFT JOIN users adm ON r.admin_id = adm.id
             WHERE 1=1
         `;
         const params = [];
@@ -96,7 +103,7 @@ const updateRequestStatus = async (req, res) => {
         }
 
         // 5. Update Request Status
-        await connection.execute('UPDATE payment_requests SET status = ?, admin_remarks = ? WHERE id = ?', [status, remark, id]);
+        await connection.execute('UPDATE payment_requests SET status = ?, admin_remarks = ?, admin_id = ? WHERE id = ?', [status, remark, req.user.id, id]);
 
         await connection.commit();
         await logAction(req.user.id, `${status}_PAYMENT`, 'payment_requests', `${status} ${request.type} of ${request.amount} for user ID ${request.user_id}`);
