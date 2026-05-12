@@ -45,8 +45,19 @@ const startExpirySquareOffJob = () => {
             for (const rule of rules) {
                 if (rule.auto_square_off !== 'Yes') continue;
 
-                const [hh, mm] = (rule.square_off_time || '11:30').split(':');
-                if (parseInt(hh) !== currentH || parseInt(mm) !== currentM) continue;
+                const [nseH, nseM] = (rule.square_off_time || '15:20').split(':');
+                const [mcxH, mcxM] = (rule.mcx_square_off_time || '23:30').split(':');
+                const [cryptoH, cryptoM] = (rule.crypto_square_off_time || '23:30').split(':');
+                const [forexH, forexM] = (rule.forex_square_off_time || '23:30').split(':');
+                const [comexH, comexM] = (rule.comex_square_off_time || '23:30').split(':');
+
+                const isNseTriggered = parseInt(nseH) === currentH && parseInt(nseM) === currentM;
+                const isMcxTriggered = parseInt(mcxH) === currentH && parseInt(mcxM) === currentM;
+                const isCryptoTriggered = parseInt(cryptoH) === currentH && parseInt(cryptoM) === currentM;
+                const isForexTriggered = parseInt(forexH) === currentH && parseInt(forexM) === currentM;
+                const isComexTriggered = parseInt(comexH) === currentH && parseInt(comexM) === currentM;
+
+                if (!isNseTriggered && !isMcxTriggered && !isCryptoTriggered && !isForexTriggered && !isComexTriggered) continue;
 
                 console.log(`[ExpirySquareOff] 🕒 Square-off reached for Admin #${rule.user_id}`);
 
@@ -79,8 +90,18 @@ const startExpirySquareOffJob = () => {
                         const mType = (trade.market_type || '').toUpperCase();
                         const isNSE = ['NSE', 'EQUITY', 'NIFTY', 'OPTIONS', 'NFO'].includes(mType);
                         const isMCX = mType === 'MCX';
+                        const isCrypto = mType === 'CRYPTO';
+                        const isForex = mType === 'FOREX';
+                        const isComex = mType === 'COMEX';
 
-                        if (!isNSE && !isMCX) continue; // Skip other segments for now
+                        if (!isNSE && !isMCX && !isCrypto && !isForex && !isComex) continue; // Skip other segments for now
+                        
+                        // Check segment specific trigger
+                        if (isNSE && !isNseTriggered) continue;
+                        if (isMCX && !isMcxTriggered) continue;
+                        if (isCrypto && !isCryptoTriggered) continue;
+                        if (isForex && !isForexTriggered) continue;
+                        if (isComex && !isComexTriggered) continue;
 
                         let holdingMarginRequired = 0;
 
@@ -106,6 +127,16 @@ const startExpirySquareOffJob = () => {
                             const turnover = entryPrice * qty;
 
                             holdingMarginRequired = turnover / (holdingDivisor || 1);
+                        }
+                        else if (isCrypto || isForex || isComex) {
+                            // ✅ GLOBAL LOGIC (Crypto/Comex/Forex)
+                            const segConfig = userConfig[`${mType.toLowerCase()}Config`] || {};
+                            const holdingExposure = parseFloat(segConfig.holdingMargin || segConfig.intradayMargin || 100);
+                            const qty = parseFloat(trade.actual_qty || trade.qty || 0);
+                            const entryPrice = parseFloat(trade.entry_price || 0);
+                            const turnover = entryPrice * qty;
+
+                            holdingMarginRequired = turnover / (holdingExposure || 1);
                         }
 
                         console.log(`[ExpirySquareOff] 📊 Checking Trade #${trade.id} (${trade.symbol}): Required: ${holdingMarginRequired.toFixed(2)}, Available: ${trade.balance}`);

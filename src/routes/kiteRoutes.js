@@ -122,7 +122,7 @@ function getTokenSync(symbol) {
 
 // ── NIFTY 50 (50 stocks — Apr 2026 official list, Zerodha exact symbols) ──
 /** Bump when default unified watchlist shape changes (invalidates HTTP cache + precompute). */
-const WATCHLIST_CACHE_BUST = 'watchlist_v5_lot_sizes_fix';
+const WATCHLIST_CACHE_BUST = 'watchlist_v7_custom_mcx_continuous';
 
 /** NFO index options included in unified watchlist (instruments + quotes from Kite only). */
 const NFO_INDEX_OPTION_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY']);
@@ -157,7 +157,7 @@ async function loadGroupsFromDb() {
         BANKNIFTY = groups['BANK NIFTY'] || [];
         MIDCAP = groups['MIDCAP SELECT'] || [];
         FINNIFTY = groups['FIN NIFTY'] || [];
-        MCX_BASES = groups['MCX FUTURES'] || [];
+        MCX_BASES = Array.from(new Set([...(groups['MCX FUTURES'] || []), 'MGOLD', 'MCRUDEOIL', 'MSILVER', 'MNATURALGAS', 'MCOPPER', 'MLEAD', 'MZINC', 'MALUMINIUM']));
         NFO_INDICES = groups['NFO INDICES'] || [];
         NSE_INDICES = (groups['NSE INDICES'] || []).map(s => `NSE:${s}`);
         
@@ -369,6 +369,7 @@ const MCX_ALLOWED_WATCHLIST = [
     'GOLD', 'SILVER', 'CRUDEOIL', 'COPPER', 'ZINC', 'ALUMINIUM', 'LEAD', 'NATURALGAS',
     'GOLDM', 'SILVERM', 'CRUDEOILM', 'ZINCMINI', 'LEADMINI', 'COPPERM', 'NATURALGASMINI',
     'ALUMINI',
+    'MGOLD', 'MCRUDEOIL', 'MSILVER', 'MNATURALGAS', 'MCOPPER', 'MLEAD', 'MZINC', 'MALUMINIUM',
 ];
 
 /** Unified watchlist: MCX options only for Crude + Natural Gas (incl. mini); other MCX bases = nearest FUT only */
@@ -403,7 +404,7 @@ async function buildFutSymbols(exchange, baseNames, maxExpiries = 2) {
             const matches = relevantContracts
                 .filter(i => {
                     const sym = (i.tradingsymbol || '').toUpperCase();
-                    return sym.startsWith(baseUpper) && sym.endsWith('FUT');
+                    return sym === baseUpper || (sym.startsWith(baseUpper) && sym.endsWith('FUT'));
                 })
                 .sort((a, b) => new Date(a.expiry || 0) - new Date(b.expiry || 0));
 
@@ -1297,10 +1298,19 @@ const MCX_ALLOWED = {
     LEADMINI: { step: 5, label: 'Lead Mini' },
     COPPERM: { step: 5, label: 'Copper Mini' },
     NATGASMINI: { step: 10, label: 'Natural Gas Mini' },
+    // Custom Merged contracts
+    MGOLD: { step: 100, label: 'Merged Gold' },
+    MCRUDEOIL: { step: 50, label: 'Merged Crude Oil' },
+    MSILVER: { step: 500, label: 'Merged Silver' },
+    MNATURALGAS: { step: 10, label: 'Merged Natural Gas' },
+    MCOPPER: { step: 5, label: 'Merged Copper' },
+    MLEAD: { step: 5, label: 'Merged Lead' },
+    MZINC: { step: 5, label: 'Merged Zinc' },
+    MALUMINIUM: { step: 5, label: 'Merged Aluminium' },
 };
 
 const MCX_MAIN = ['GOLD', 'SILVER', 'CRUDEOIL', 'COPPER', 'ZINC', 'ALUMINIUM', 'LEAD', 'NATURALGAS'];
-const MCX_MINI = ['GOLDM', 'SILVERM', 'CRUDEOILM', 'ZINCMINI', 'ALUMINI', 'LEADMINI', 'COPPERM', 'NATGASMINI'];
+const MCX_MINI = ['GOLDM', 'SILVERM', 'CRUDEOILM', 'ZINCMINI', 'ALUMINI', 'LEADMINI', 'COPPERM', 'NATGASMINI', 'MGOLD', 'MCRUDEOIL', 'MSILVER', 'MNATURALGAS', 'MCOPPER', 'MLEAD', 'MZINC', 'MALUMINIUM'];
 const MCX_ALL_SYMBOLS = [...MCX_MAIN, ...MCX_MINI];
 
 // Helper: fetch fresh quotes (NO cache, always live)
@@ -1352,6 +1362,7 @@ function isExactMcxFutureForBase(tradingSymbol, base) {
     const ts = String(tradingSymbol || '').toUpperCase();
     const b = String(base || '').toUpperCase();
     if (!ts || !b) return false;
+    if (ts === b) return true;
     return new RegExp(`^${b}\\d{1,2}[A-Z]{3}\\d{0,2}FUT$`).test(ts);
 }
 
@@ -1659,6 +1670,39 @@ router.get('/market/search', authMiddleware, asyncHandler(async (req, res) => {
 
     const instruments = await getInstrumentsFromCache();
     const query = q.toUpperCase();
+    
+    // Fetch lot sizes from scrip_data for script-wise dynamic values without strict matching
+    const [lotRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
+    const scripList = lotRows.map(r => {
+        const sym = (r.symbol || '').toUpperCase().trim();
+        const base = sym.replace(/\d+[A-Z]{3}\d*[CP]E$|\d+[A-Z]{3}\d*FUT$/i, '').trim();
+        return {
+            symbol: sym,
+            base: base,
+            lotSize: parseFloat(r.lot_size || 1)
+        };
+    }).sort((a, b) => b.symbol.length - a.symbol.length);
+
+    const getDynamicLotSize = (inst) => {
+        const tSym = (inst.tradingsymbol || '').toUpperCase().trim();
+        const nameSym = (inst.name || '').toUpperCase().trim();
+
+        let matched = scripList.find(s => s.symbol === tSym);
+        if (matched && matched.lotSize > 0) return matched.lotSize;
+
+        matched = scripList.find(s => s.symbol === nameSym || s.base === nameSym);
+        if (matched && matched.lotSize > 0) return matched.lotSize;
+
+        matched = scripList.find(s => tSym.startsWith(s.symbol));
+        if (matched && matched.lotSize > 0) return matched.lotSize;
+
+        matched = scripList.find(s => s.base && s.base.length >= 3 && tSym.startsWith(s.base));
+        if (matched && matched.lotSize > 0) return matched.lotSize;
+
+        const kiteLot = parseFloat(inst.lot_size);
+        return (!isNaN(kiteLot) && kiteLot > 0) ? kiteLot : 1;
+    };
+
     const results = instruments
         .filter(i => i.tradingsymbol?.toUpperCase().startsWith(query) || i.name?.toUpperCase().startsWith(query))
         .slice(0, 100)
@@ -1668,7 +1712,9 @@ router.get('/market/search', authMiddleware, asyncHandler(async (req, res) => {
             name: i.name || '',
             type: i.instrument_type || '',
             expiry: i.expiry || '',
-            instrument_token: i.instrument_token
+            instrument_token: i.instrument_token,
+            lot_size: getDynamicLotSize(i),
+            lotSize: getDynamicLotSize(i)
         }));
 
     res.json({ status: 'success', count: results.length, data: results });
@@ -1740,6 +1786,39 @@ router.get('/instruments/search', authMiddleware, asyncHandler(async (req, res) 
     if (!q || q.length < 1) return res.json([]);
     const instruments = await getInstrumentsFromCache();
     const query = q.toUpperCase();
+    
+    // Fetch lot sizes from scrip_data for script-wise dynamic values without strict matching
+    const [lotRows] = await db.execute('SELECT symbol, lot_size FROM scrip_data');
+    const scripList = lotRows.map(r => {
+        const sym = (r.symbol || '').toUpperCase().trim();
+        const base = sym.replace(/\d+[A-Z]{3}\d*[CP]E$|\d+[A-Z]{3}\d*FUT$/i, '').trim();
+        return {
+            symbol: sym,
+            base: base,
+            lotSize: parseFloat(r.lot_size || 1)
+        };
+    }).sort((a, b) => b.symbol.length - a.symbol.length);
+
+    const getDynamicLotSize = (inst) => {
+        const tSym = (inst.tradingsymbol || '').toUpperCase().trim();
+        const nameSym = (inst.name || '').toUpperCase().trim();
+
+        let matched = scripList.find(s => s.symbol === tSym);
+        if (matched && matched.lotSize > 0) return matched.lotSize;
+
+        matched = scripList.find(s => s.symbol === nameSym || s.base === nameSym);
+        if (matched && matched.lotSize > 0) return matched.lotSize;
+
+        matched = scripList.find(s => tSym.startsWith(s.symbol));
+        if (matched && matched.lotSize > 0) return matched.lotSize;
+
+        matched = scripList.find(s => s.base && s.base.length >= 3 && tSym.startsWith(s.base));
+        if (matched && matched.lotSize > 0) return matched.lotSize;
+
+        const kiteLot = parseFloat(inst.lot_size);
+        return (!isNaN(kiteLot) && kiteLot > 0) ? kiteLot : 1;
+    };
+
     let results = instruments.filter(i => {
         const matchesQuery = (i.tradingsymbol || '').toUpperCase().includes(query) ||
                              (i.name || '').toUpperCase().includes(query);
@@ -1752,8 +1831,40 @@ router.get('/instruments/search', authMiddleware, asyncHandler(async (req, res) 
         name: i.name,
         type: i.instrument_type,
         expiry: i.expiry,
-        instrument_token: i.instrument_token
+        instrument_token: i.instrument_token,
+        lot_size: getDynamicLotSize(i),
+        lotSize: getDynamicLotSize(i)
     })));
+}));
+
+router.post('/quotes', authMiddleware, asyncHandler(async (req, res) => {
+    const { tokens } = req.body;
+    if (!Array.isArray(tokens) || tokens.length === 0) {
+        return res.json({});
+    }
+
+    try {
+        const quotes = await kiteService.getQuote(tokens);
+        const formatted = {};
+        if (quotes && typeof quotes === 'object') {
+            for (const [key, quote] of Object.entries(quotes)) {
+                formatted[key] = {
+                    bid: quote.bid || quote.last_price || 0,
+                    ask: quote.ask || quote.last_price || 0,
+                    last_price: quote.last_price || 0,
+                    high: quote.ohlc?.high || 0,
+                    low: quote.ohlc?.low || 0,
+                    open: quote.ohlc?.open || 0,
+                    close: quote.ohlc?.close || 0,
+                    volume: quote.volume || 0
+                };
+            }
+        }
+        res.json(formatted);
+    } catch (err) {
+        console.error('[Kite Quotes] Error:', err.message);
+        res.json({});
+    }
 }));
 
 router.get('/sync-instruments', authMiddleware, asyncHandler(async (req, res) => {

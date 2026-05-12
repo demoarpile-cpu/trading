@@ -40,7 +40,7 @@ class MarketDataService extends EventEmitter {
         // Subscription Sets
         this.subscribedTokens = new Set();
         this.subscribedSymbols = new Set();
-        this.instrumentMap = {}; // token -> symbol
+        this.instrumentMap = {}; // token -> Set of symbols
 
         // Binance Connection State
         this.binanceWs = null;
@@ -195,8 +195,10 @@ class MarketDataService extends EventEmitter {
                 ];
                 const indexTokenNums = INDEX_TOKENS.map(i => i.token);
                 INDEX_TOKENS.forEach(i => {
-                    this.instrumentMap[String(i.token)] = i.symbol;
-                    this.subscribedTokens.add(String(i.token));
+                    const sToken = String(i.token);
+                    if (!this.instrumentMap[sToken]) this.instrumentMap[sToken] = new Set();
+                    this.instrumentMap[sToken].add(i.symbol);
+                    this.subscribedTokens.add(sToken);
                 });
                 this.ticker.subscribe(indexTokenNums);
                 this.ticker.setMode(this.ticker.modeFull, indexTokenNums);
@@ -275,33 +277,36 @@ class MarketDataService extends EventEmitter {
 
         ticks.forEach(tick => {
             const token = String(tick.instrument_token);
-            const symbol = this.instrumentMap[token] || token;
-            const prev = this.prices[symbol] || {};
+            const symbols = this.instrumentMap[token] || new Set([token]);
+            
+            symbols.forEach(symbol => {
+                const prev = this.prices[symbol] || {};
 
-            const buy0 = tick.depth?.buy?.[0]?.price;
-            const sell0 = tick.depth?.sell?.[0]?.price;
-            const hasBid = buy0 != null && Number.isFinite(Number(buy0));
-            const hasAsk = sell0 != null && Number.isFinite(Number(sell0));
+                const buy0 = tick.depth?.buy?.[0]?.price;
+                const sell0 = tick.depth?.sell?.[0]?.price;
+                const hasBid = buy0 != null && Number.isFinite(Number(buy0));
+                const hasAsk = sell0 != null && Number.isFinite(Number(sell0));
 
-            const ltp = tick.last_price != null ? tick.last_price : prev.ltp;
-            const isIndex = INDEX_SYMBOLS.has(symbol);
+                const ltp = tick.last_price != null ? tick.last_price : prev.ltp;
+                const isIndex = INDEX_SYMBOLS.has(symbol);
 
-            const data = {
-                ...prev,
-                symbol,
-                ltp,
-                // For indices: no order book, so bid = ask = ltp
-                bid: hasBid ? Number(buy0) : (isIndex ? ltp : (prev.bid || 0)),
-                ask: hasAsk ? Number(sell0) : (isIndex ? ltp : (prev.ask || 0)),
-                change: tick.net_change != null ? tick.net_change : prev.change,
-                volume: tick.volume_traded != null ? tick.volume_traded : prev.volume,
-                ohlc: tick.ohlc && Object.keys(tick.ohlc).length ? tick.ohlc : (prev.ohlc || {}),
-                depth: tick.depth && (tick.depth.buy?.length || tick.depth.sell?.length) ? tick.depth : (prev.depth || {}),
-                type: (symbol.startsWith('NSE') || symbol.startsWith('NFO') || symbol.startsWith('MCX')) ? symbol.split(':')[0] : (prev.type || 'NSE')
-            };
+                const data = {
+                    ...prev,
+                    symbol,
+                    ltp,
+                    // For indices: no order book, so bid = ask = ltp
+                    bid: hasBid ? Number(buy0) : (isIndex ? ltp : (prev.bid || 0)),
+                    ask: hasAsk ? Number(sell0) : (isIndex ? ltp : (prev.ask || 0)),
+                    change: tick.net_change != null ? tick.net_change : prev.change,
+                    volume: tick.volume_traded != null ? tick.volume_traded : prev.volume,
+                    ohlc: tick.ohlc && Object.keys(tick.ohlc).length ? tick.ohlc : (prev.ohlc || {}),
+                    depth: tick.depth && (tick.depth.buy?.length || tick.depth.sell?.length) ? tick.depth : (prev.depth || {}),
+                    type: (symbol.startsWith('NSE') || symbol.startsWith('NFO') || symbol.startsWith('MCX')) ? symbol.split(':')[0] : (prev.type || 'NSE')
+                };
 
-            this.prices[symbol] = data;
-            this.dirtySymbols.add(symbol);
+                this.prices[symbol] = data;
+                this.dirtySymbols.add(symbol);
+            });
         });
     }
 
@@ -312,7 +317,8 @@ class MarketDataService extends EventEmitter {
         }
 
         const sToken = String(token);
-        this.instrumentMap[sToken] = symbol;
+        if (!this.instrumentMap[sToken]) this.instrumentMap[sToken] = new Set();
+        this.instrumentMap[sToken].add(symbol);
         this.subscribedTokens.add(sToken);
 
         if (this.ticker && this.ticker.connected) {
@@ -333,7 +339,8 @@ class MarketDataService extends EventEmitter {
             }
 
             const sToken = String(item.token);
-            this.instrumentMap[sToken] = item.symbol;
+            if (!this.instrumentMap[sToken]) this.instrumentMap[sToken] = new Set();
+            this.instrumentMap[sToken].add(item.symbol);
             this.subscribedTokens.add(sToken);
             tokenNums.push(parseInt(sToken, 10));
         }

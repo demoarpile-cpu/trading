@@ -118,7 +118,7 @@ const placeOrder = async (req, res) => {
 
         // ─── DETECT MARKET TYPE EARLY (needed for all segment-specific validations) ───
         const sym = symbol.toUpperCase();
-        const MCX_SYMBOLS = ['GOLD', 'GOLDM', 'SILVER', 'SILVERM', 'CRUDEOIL', 'COPPER', 'NICKEL', 'ZINC', 'LEAD', 'ALUMINIUM', 'ALUMINI', 'NATURALGAS', 'MENTHAOIL', 'COTTON', 'BULLDEX', 'CRUDEOIL MINI', 'ZINCMINI', 'LEADMINI', 'SILVER MIC'];
+        const MCX_SYMBOLS = ['GOLD', 'GOLDM', 'SILVER', 'SILVERM', 'CRUDEOIL', 'COPPER', 'NICKEL', 'ZINC', 'LEAD', 'ALUMINIUM', 'ALUMINI', 'NATURALGAS', 'MENTHAOIL', 'COTTON', 'BULLDEX', 'CRUDEOIL MINI', 'ZINCMINI', 'LEADMINI', 'SILVER MIC', 'MGOLD', 'MCRUDEOIL', 'MSILVER', 'MNATURALGAS', 'MCOPPER', 'MLEAD', 'MZINC', 'MALUMINIUM'];
         let marketType = 'MCX';
         if (MCX_SYMBOLS.some(s => sym.includes(s))) {
             marketType = 'MCX';
@@ -560,15 +560,15 @@ const placeOrder = async (req, res) => {
         // MCX LOT SIZES (100% Complete - DO NOT MODIFY)
         // ══════════════════════════════════════════════════════════════════
         const MCX_LOT_SIZES = {
-            'GOLD': 100, 'GOLDM': 10, 'GOLDGUINEA': 8, 'GOLDPETAL': 1,
-            'SILVER': 30, 'SILVERM': 5, 'SILVERMIC': 1,
-            'CRUDEOIL': 100, 'CRUDEOILM': 10,
-            'NATURALGAS': 1250, 'NATGASMINI': 250,
-            'COPPER': 2500,
-            'ZINC': 5000, 'ZINCMINI': 1000,
-            'LEAD': 5000, 'LEADMINI': 1000,
+            'GOLD': 100, 'GOLDM': 10, 'GOLDGUINEA': 8, 'GOLDPETAL': 1, 'MGOLD': 10,
+            'SILVER': 30, 'SILVERM': 5, 'SILVERMIC': 1, 'MSILVER': 5,
+            'CRUDEOIL': 100, 'CRUDEOILM': 10, 'MCRUDEOIL': 10,
+            'NATURALGAS': 1250, 'NATGASMINI': 250, 'MNATURALGAS': 250,
+            'COPPER': 2500, 'MCOPPER': 500,
+            'ZINC': 5000, 'ZINCMINI': 1000, 'MZINC': 1000,
+            'LEAD': 5000, 'LEADMINI': 1000, 'MLEAD': 1000,
             'NICKEL': 1500, 'NICKELMINI': 100,
-            'ALUMINIUM': 5000, 'ALUMINI': 1000,
+            'ALUMINIUM': 5000, 'ALUMINI': 1000, 'MALUMINIUM': 1000,
             'MENTHAOIL': 360, 'COTTON': 25, 'BULLDEX': 1,
         };
 

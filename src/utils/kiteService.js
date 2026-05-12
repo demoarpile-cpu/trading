@@ -192,17 +192,88 @@ class KiteService {
     async getOrders() { return this.makeRequest('/orders'); }
     async getTrades() { return this.makeRequest('/trades'); }
 
+    _mapVirtualToMega(instrument) {
+        if (!instrument.startsWith('MCX:M')) return instrument;
+        const cleanSym = instrument.replace('MCX:', '').trim();
+        if (this.nearestMegaMap && this.nearestMegaMap[cleanSym]) {
+            return `MCX:${this.nearestMegaMap[cleanSym]}`;
+        }
+        const VIRTUAL_MAP = {
+            'MGOLD': 'GOLD',
+            'MCRUDEOIL': 'CRUDEOIL',
+            'MSILVER': 'SILVER',
+            'MNATURALGAS': 'NATURALGAS',
+            'MCOPPER': 'COPPER',
+            'MLEAD': 'LEAD',
+            'MZINC': 'ZINC',
+            'MALUMINIUM': 'ALUMINIUM'
+        };
+        let mapped = instrument;
+        for (const [virt, mega] of Object.entries(VIRTUAL_MAP)) {
+            if (instrument.includes(`MCX:${virt}`)) {
+                mapped = instrument.replace(`MCX:${virt}`, `MCX:${mega}`);
+                break;
+            }
+        }
+        return mapped;
+    }
+
     async getQuote(instruments) {
         const arr = Array.isArray(instruments) ? instruments : instruments.split(',');
-        const query = arr.map(i => `i=${encodeURIComponent(i.trim())}`).join('&');
-        return this.makeRequest(`/quote?${query}`);
+        const queryMap = {};
+        const kiteQuery = [];
+        
+        arr.forEach(i => {
+            const mapped = this._mapVirtualToMega(i);
+            if (!queryMap[mapped]) queryMap[mapped] = [];
+            queryMap[mapped].push(i);
+            kiteQuery.push(`i=${encodeURIComponent(mapped.trim())}`);
+        });
+
+        const uniqueQuery = [...new Set(kiteQuery)].join('&');
+        const data = await this.makeRequest(`/quote?${uniqueQuery}`);
+        
+        const result = {};
+        for (const [mappedSym, val] of Object.entries(data)) {
+            if (queryMap[mappedSym]) {
+                queryMap[mappedSym].forEach(originalSym => {
+                    result[originalSym] = { ...val };
+                });
+            } else {
+                result[mappedSym] = val;
+            }
+        }
+        return result;
     }
 
     async getLTP(instruments) {
         const arr = Array.isArray(instruments) ? instruments : instruments.split(',');
-        const query = arr.map(i => `i=${encodeURIComponent(i.trim())}`).join('&');
-        return this.makeRequest(`/quote/ltp?${query}`);
+        const queryMap = {};
+        const kiteQuery = [];
+        
+        arr.forEach(i => {
+            const mapped = this._mapVirtualToMega(i);
+            if (!queryMap[mapped]) queryMap[mapped] = [];
+            queryMap[mapped].push(i);
+            kiteQuery.push(`i=${encodeURIComponent(mapped.trim())}`);
+        });
+
+        const uniqueQuery = [...new Set(kiteQuery)].join('&');
+        const data = await this.makeRequest(`/quote/ltp?${uniqueQuery}`);
+        
+        const result = {};
+        for (const [mappedSym, val] of Object.entries(data)) {
+            if (queryMap[mappedSym]) {
+                queryMap[mappedSym].forEach(originalSym => {
+                    result[originalSym] = { ...val };
+                });
+            } else {
+                result[mappedSym] = val;
+            }
+        }
+        return result;
     }
+
 
     async getInstruments() {
         // The /instruments endpoint returns CSV, not JSON
@@ -218,6 +289,18 @@ class KiteService {
         const headers_arr = lines[0].split(',');
 
         const instruments = [];
+        const clonedInstruments = [];
+        const CUSTOM_BASES = {
+            'GOLD': 'MGOLD',
+            'CRUDEOIL': 'MCRUDEOIL',
+            'SILVER': 'MSILVER',
+            'NATURALGAS': 'MNATURALGAS',
+            'COPPER': 'MCOPPER',
+            'LEAD': 'MLEAD',
+            'ZINC': 'MZINC',
+            'ALUMINIUM': 'MALUMINIUM'
+        };
+
         for (let i = 1; i < lines.length; i++) {
             const values = lines[i].split(',');
             const instrument = {};
@@ -230,7 +313,26 @@ class KiteService {
             instruments.push(instrument);
         }
 
-        return instruments;
+        const now = new Date();
+        this.nearestMegaMap = {};
+        for (const [mega, custom] of Object.entries(CUSTOM_BASES)) {
+            const futs = instruments
+                .filter(i => i.exchange === 'MCX' && i.instrument_type === 'FUT' && i.name === mega)
+                .filter(i => new Date(i.expiry || 0) >= now)
+                .sort((a, b) => new Date(a.expiry || 0) - new Date(b.expiry || 0));
+
+            if (futs.length > 0) {
+                const nearest = futs[0];
+                this.nearestMegaMap[custom] = nearest.tradingsymbol;
+                clonedInstruments.push({
+                    ...nearest,
+                    name: custom,
+                    tradingsymbol: custom
+                });
+            }
+        }
+
+        return [...instruments, ...clonedInstruments];
     }
 
     async getHistoricalData(instrumentToken, interval, from, to) {
