@@ -37,8 +37,8 @@ class MockMarketEngine extends EventEmitter {
 
         // ✅ Create a list of allowed base symbols to prevent option-to-index mapping
         const allowedBases = ['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'NIFTY', 'BANKNIFTY'];
-        const baseSymbol = symbol.replace(/\d+[A-Z]*$/g, '').trim(); 
-        
+        const baseSymbol = symbol.replace(/\d+[A-Z]*$/g, '').trim();
+
         if (baseSymbol && baseSymbol !== symbol && allowedBases.includes(baseSymbol) && this.prices[baseSymbol]) {
             // ONLY use base price if it's NOT an option (options shouldn't use index price)
             if (!symbol.includes('CE') && !symbol.includes('PE')) {

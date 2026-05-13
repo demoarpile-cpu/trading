@@ -44,7 +44,7 @@ class InstrumentSyncService {
             // 1. Get base symbols from market_group_items
             const [baseRows] = await db.execute('SELECT DISTINCT symbol FROM market_group_items');
             const baseSymbols = new Set(baseRows.map(r => r.symbol.toUpperCase()));
-            
+
             if (baseSymbols.size === 0) {
                 console.warn('⚠️ [InstrumentSyncService] No base symbols found in market_group_items');
                 return { success: false, error: 'No base symbols' };
@@ -116,7 +116,7 @@ class InstrumentSyncService {
                 for (let i = 0; i < toSync.length; i += batchSize) {
                     const batch = toSync.slice(i, i + batchSize);
                     const values = batch.map(item => [item.symbol, item.lot_size, 50, item.market_type, item.expiry]);
-                    
+
                     await connection.query(
                         'INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type, expiry_date) VALUES ?',
                         [values]

@@ -22,17 +22,17 @@ const monitorPendingOrders = async () => {
                 // Normalize symbol for matching with live data
                 const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
                 const marketType = (trade.market_type || 'MCX').toUpperCase();
-                
+
                 // Determine the correct prefix for MarketDataService lookup
                 let prefix = 'NSE';
                 if (marketType === 'MCX') prefix = 'MCX';
                 else if (marketType === 'NFO' || marketType === 'OPTIONS') prefix = 'NFO';
                 else if (marketType === 'CRYPTO') prefix = 'CRYPTO';
                 else if (marketType === 'FOREX') prefix = 'FOREX';
-                
+
                 let currentPrice = null;
                 const possibleSymbols = [trade.symbol, `${prefix}:${cleanSymbol}`, cleanSymbol];
-                
+
                 for (const s of possibleSymbols) {
                     const data = marketDataService.getPrice(s);
                     if (data && data.ltp) {
@@ -59,7 +59,7 @@ const monitorPendingOrders = async () => {
 
                 if (shouldExecute) {
                     console.log(`[PendingOrder] 🚀 EXECUTING Trade #${trade.id} (${trade.symbol}) at ${currentPrice} (Limit: ${limitPrice})`);
-                    
+
                     // 1. Update trade to ACTIVE (is_pending = 0) and refresh entry time
                     await db.execute(
                         'UPDATE trades SET is_pending = 0, executed_from_pending = 1, entry_time = NOW() WHERE id = ?',
@@ -67,7 +67,7 @@ const monitorPendingOrders = async () => {
                     );
 
                     // 2. Log the execution
-                    await logAction(trade.user_id, 'EXECUTE_PENDING', 'trades', 
+                    await logAction(trade.user_id, 'EXECUTE_PENDING', 'trades',
                         `Pending order #${trade.id} executed at market price ${currentPrice} (Limit: ${limitPrice})`);
 
                     // 3. Notify user via Socket for real-time UI update
@@ -79,10 +79,10 @@ const monitorPendingOrders = async () => {
                             type: 'ORDER_EXECUTED',
                             tradeId: trade.id
                         });
-                        
+
                         // Force a refresh of trades in the app
-                        io.to(`user:${trade.user_id}`).emit('trade_update', { 
-                            id: trade.id, 
+                        io.to(`user:${trade.user_id}`).emit('trade_update', {
+                            id: trade.id,
                             is_pending: 0,
                             status: 'OPEN'
                         });
@@ -108,9 +108,23 @@ const startPendingOrderMonitoring = () => {
         isMonitoring = true;
         monitorPendingOrders()
             .finally(() => { isMonitoring = false; });
-    }, 3000); 
+    }, 3000);
 
     console.log('[PendingOrder] 🚀 Pending order matching service started (3s interval)');
 };
+
+module.exports = { startPendingOrderMonitoring };
+ * Checks every 3 seconds for price matches
+    */
+const startPendingOrderMonitoring = () => {
+        setInterval(() => {
+            if (isMonitoring) return;
+            isMonitoring = true;
+            monitorPendingOrders()
+                .finally(() => { isMonitoring = false; });
+        }, 3000);
+
+        console.log('[PendingOrder] 🚀 Pending order matching service started (3s interval)');
+    };
 
 module.exports = { startPendingOrderMonitoring };

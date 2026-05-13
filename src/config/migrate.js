@@ -124,8 +124,8 @@ const runMigrations = async () => {
     `);
 
     await addColumn('broker_shares', 'permissions_json', 'TEXT DEFAULT NULL');
-    await addColumn('broker_shares', 'segments_json',    'TEXT DEFAULT NULL');
-    await addColumn('broker_shares', 'swap_rate',        'DECIMAL(8,2) DEFAULT 5.00');
+    await addColumn('broker_shares', 'segments_json', 'TEXT DEFAULT NULL');
+    await addColumn('broker_shares', 'swap_rate', 'DECIMAL(8,2) DEFAULT 5.00');
 
     // ─── 5. USER SEGMENTS ──────────────────────────────────────────────────────
 
@@ -240,12 +240,12 @@ const runMigrations = async () => {
     `);
 
     // Add missing columns to payment_requests (added for withdrawal bank details)
-    await addColumn('payment_requests', 'bank_name',       "VARCHAR(100) DEFAULT NULL AFTER screenshot_url");
-    await addColumn('payment_requests', 'account_holder',  "VARCHAR(100) DEFAULT NULL AFTER bank_name");
-    await addColumn('payment_requests', 'account_number',  "VARCHAR(50) DEFAULT NULL AFTER account_holder");
-    await addColumn('payment_requests', 'ifsc_code',       "VARCHAR(20) DEFAULT NULL AFTER account_number");
-    await addColumn('payment_requests', 'upi_id',          "VARCHAR(100) DEFAULT NULL AFTER ifsc_code");
-    await addColumn('payment_requests', 'payment_method',  "VARCHAR(30) DEFAULT NULL AFTER upi_id");
+    await addColumn('payment_requests', 'bank_name', "VARCHAR(100) DEFAULT NULL AFTER screenshot_url");
+    await addColumn('payment_requests', 'account_holder', "VARCHAR(100) DEFAULT NULL AFTER bank_name");
+    await addColumn('payment_requests', 'account_number', "VARCHAR(50) DEFAULT NULL AFTER account_holder");
+    await addColumn('payment_requests', 'ifsc_code', "VARCHAR(20) DEFAULT NULL AFTER account_number");
+    await addColumn('payment_requests', 'upi_id', "VARCHAR(100) DEFAULT NULL AFTER ifsc_code");
+    await addColumn('payment_requests', 'payment_method', "VARCHAR(30) DEFAULT NULL AFTER upi_id");
 
     // ─── 9. SECURITY ───────────────────────────────────────────────────────────
 
@@ -335,43 +335,43 @@ const runMigrations = async () => {
     `);
 
     // Expand market_type enum to include NFO
-    try { await db.execute(`ALTER TABLE scrip_data MODIFY COLUMN market_type ENUM('MCX','NSE','NFO','EQUITY','COMEX','FOREX','CRYPTO') DEFAULT 'MCX'`); } catch(_) {}
+    try { await db.execute(`ALTER TABLE scrip_data MODIFY COLUMN market_type ENUM('MCX','NSE','NFO','EQUITY','COMEX','FOREX','CRYPTO') DEFAULT 'MCX'`); } catch (_) { }
 
     // Seed ALL curated scrips (NIFTY50 + BANKNIFTY + MIDCAP + FINNIFTY + MCX + NFO)
     // Scrips are now managed via market_groups and market_group_items for watchlist purposes.
     // The scrip_data table remains for core instrument overrides (lot size, margin).
     const seedScrips = [
         // ── MCX Normal ──
-        ['GOLD',1,100,'MCX'],['GOLDM',1,50,'MCX'],['GOLDPETAL',1,30,'MCX'],['GOLDGUINEA',1,30,'MCX'],
-        ['SILVER',1,100,'MCX'],['SILVERM',1,50,'MCX'],['SILVERMICRO',1,25,'MCX'],
-        ['CRUDEOIL',1,100,'MCX'],['CRUDEOILM',1,50,'MCX'],
-        ['NATURALGAS',1,100,'MCX'],['NATGASMINI',1,50,'MCX'],
-        ['COPPER',1,100,'MCX'],['COPPERM',1,50,'MCX'],
-        ['ZINC',1,100,'MCX'],['ZINCMINI',1,50,'MCX'],
-        ['LEAD',1,100,'MCX'],['LEADMINI',1,50,'MCX'],
-        ['NICKEL',1,100,'MCX'],['NICKELMINI',1,50,'MCX'],
-        ['ALUMINIUM',1,100,'MCX'],['ALUMINI',1,50,'MCX'],
-        ['MENTHAOIL',1,100,'MCX'],['COTTON',1,100,'MCX'],['COTTONCNDY',1,100,'MCX'],
+        ['GOLD', 1, 100, 'MCX'], ['GOLDM', 1, 50, 'MCX'], ['GOLDPETAL', 1, 30, 'MCX'], ['GOLDGUINEA', 1, 30, 'MCX'],
+        ['SILVER', 1, 100, 'MCX'], ['SILVERM', 1, 50, 'MCX'], ['SILVERMICRO', 1, 25, 'MCX'],
+        ['CRUDEOIL', 1, 100, 'MCX'], ['CRUDEOILM', 1, 50, 'MCX'],
+        ['NATURALGAS', 1, 100, 'MCX'], ['NATGASMINI', 1, 50, 'MCX'],
+        ['COPPER', 1, 100, 'MCX'], ['COPPERM', 1, 50, 'MCX'],
+        ['ZINC', 1, 100, 'MCX'], ['ZINCMINI', 1, 50, 'MCX'],
+        ['LEAD', 1, 100, 'MCX'], ['LEADMINI', 1, 50, 'MCX'],
+        ['NICKEL', 1, 100, 'MCX'], ['NICKELMINI', 1, 50, 'MCX'],
+        ['ALUMINIUM', 1, 100, 'MCX'], ['ALUMINI', 1, 50, 'MCX'],
+        ['MENTHAOIL', 1, 100, 'MCX'], ['COTTON', 1, 100, 'MCX'], ['COTTONCNDY', 1, 100, 'MCX'],
         // ── NIFTY 50 (50 stocks) ──
-        ['ADANIPORTS',1,50,'EQUITY'],['APOLLOHOSP',1,50,'EQUITY'],['ASIANPAINT',1,50,'EQUITY'],
-        ['AXISBANK',1,50,'EQUITY'],['BAJAJ-AUTO',1,50,'EQUITY'],['BAJFINANCE',1,50,'EQUITY'],
-        ['BAJAJFINSV',1,50,'EQUITY'],['BEL',1,50,'EQUITY'],['BHARTIARTL',1,50,'EQUITY'],
-        ['BPCL',1,50,'EQUITY'],['BRITANNIA',1,50,'EQUITY'],['CIPLA',1,50,'EQUITY'],
-        ['COALINDIA',1,50,'EQUITY'],['DIVISLAB',1,50,'EQUITY'],['DRREDDY',1,50,'EQUITY'],
-        ['EICHERMOT',1,50,'EQUITY'],['GRASIM',1,50,'EQUITY'],['HCLTECH',1,50,'EQUITY'],
-        ['HDFCBANK',1,50,'EQUITY'],['HDFCLIFE',1,50,'EQUITY'],['HEROMOTOCO',1,50,'EQUITY'],
-        ['HINDALCO',1,50,'EQUITY'],['HINDUNILVR',1,50,'EQUITY'],['ICICIBANK',1,50,'EQUITY'],
-        ['INDUSINDBK',1,50,'EQUITY'],['INFY',1,50,'EQUITY'],['ITC',1,50,'EQUITY'],
-        ['JSWSTEEL',1,50,'EQUITY'],['KOTAKBANK',1,50,'EQUITY'],['LT',1,50,'EQUITY'],
-        ['M&M',1,50,'EQUITY'],['MARUTI',1,50,'EQUITY'],['NESTLEIND',1,50,'EQUITY'],
-        ['NTPC',1,50,'EQUITY'],['ONGC',1,50,'EQUITY'],['POWERGRID',1,50,'EQUITY'],
-        ['RELIANCE',1,50,'EQUITY'],['SBILIFE',1,50,'EQUITY'],['SBIN',1,50,'EQUITY'],
-        ['SHRIRAMFIN',1,50,'EQUITY'],['SUNPHARMA',1,50,'EQUITY'],['TATACONSUM',1,50,'EQUITY'],
-        ['TATAMOTORS',1,50,'EQUITY'],['TATASTEEL',1,50,'EQUITY'],['TCS',1,50,'EQUITY'],
-        ['TECHM',1,50,'EQUITY'],['TITAN',1,50,'EQUITY'],['TRENT',1,50,'EQUITY'],
-        ['ULTRACEMCO',1,50,'EQUITY'],['WIPRO',1,50,'EQUITY'],
+        ['ADANIPORTS', 1, 50, 'EQUITY'], ['APOLLOHOSP', 1, 50, 'EQUITY'], ['ASIANPAINT', 1, 50, 'EQUITY'],
+        ['AXISBANK', 1, 50, 'EQUITY'], ['BAJAJ-AUTO', 1, 50, 'EQUITY'], ['BAJFINANCE', 1, 50, 'EQUITY'],
+        ['BAJAJFINSV', 1, 50, 'EQUITY'], ['BEL', 1, 50, 'EQUITY'], ['BHARTIARTL', 1, 50, 'EQUITY'],
+        ['BPCL', 1, 50, 'EQUITY'], ['BRITANNIA', 1, 50, 'EQUITY'], ['CIPLA', 1, 50, 'EQUITY'],
+        ['COALINDIA', 1, 50, 'EQUITY'], ['DIVISLAB', 1, 50, 'EQUITY'], ['DRREDDY', 1, 50, 'EQUITY'],
+        ['EICHERMOT', 1, 50, 'EQUITY'], ['GRASIM', 1, 50, 'EQUITY'], ['HCLTECH', 1, 50, 'EQUITY'],
+        ['HDFCBANK', 1, 50, 'EQUITY'], ['HDFCLIFE', 1, 50, 'EQUITY'], ['HEROMOTOCO', 1, 50, 'EQUITY'],
+        ['HINDALCO', 1, 50, 'EQUITY'], ['HINDUNILVR', 1, 50, 'EQUITY'], ['ICICIBANK', 1, 50, 'EQUITY'],
+        ['INDUSINDBK', 1, 50, 'EQUITY'], ['INFY', 1, 50, 'EQUITY'], ['ITC', 1, 50, 'EQUITY'],
+        ['JSWSTEEL', 1, 50, 'EQUITY'], ['KOTAKBANK', 1, 50, 'EQUITY'], ['LT', 1, 50, 'EQUITY'],
+        ['M&M', 1, 50, 'EQUITY'], ['MARUTI', 1, 50, 'EQUITY'], ['NESTLEIND', 1, 50, 'EQUITY'],
+        ['NTPC', 1, 50, 'EQUITY'], ['ONGC', 1, 50, 'EQUITY'], ['POWERGRID', 1, 50, 'EQUITY'],
+        ['RELIANCE', 1, 50, 'EQUITY'], ['SBILIFE', 1, 50, 'EQUITY'], ['SBIN', 1, 50, 'EQUITY'],
+        ['SHRIRAMFIN', 1, 50, 'EQUITY'], ['SUNPHARMA', 1, 50, 'EQUITY'], ['TATACONSUM', 1, 50, 'EQUITY'],
+        ['TATAMOTORS', 1, 50, 'EQUITY'], ['TATASTEEL', 1, 50, 'EQUITY'], ['TCS', 1, 50, 'EQUITY'],
+        ['TECHM', 1, 50, 'EQUITY'], ['TITAN', 1, 50, 'EQUITY'], ['TRENT', 1, 50, 'EQUITY'],
+        ['ULTRACEMCO', 1, 50, 'EQUITY'], ['WIPRO', 1, 50, 'EQUITY'],
         // ── NFO Index Futures ──
-        ['NIFTY',1,50,'NFO'],['BANKNIFTY',1,50,'NFO'],['FINNIFTY',1,50,'NFO'],['MIDCPNIFTY',1,50,'NFO'],
+        ['NIFTY', 1, 50, 'NFO'], ['BANKNIFTY', 1, 50, 'NFO'], ['FINNIFTY', 1, 50, 'NFO'], ['MIDCPNIFTY', 1, 50, 'NFO'],
     ];
 
     for (const [sym, lot, margin, mtype] of seedScrips) {
@@ -380,7 +380,7 @@ const runMigrations = async () => {
                 'INSERT IGNORE INTO scrip_data (symbol, lot_size, margin_req, market_type) VALUES (?, ?, ?, ?)',
                 [sym, lot, margin, mtype]
             );
-        } catch (_) {}
+        } catch (_) { }
     }
 
     await db.execute(`
@@ -397,7 +397,7 @@ const runMigrations = async () => {
 
     // Add start_time/end_time for tickers created before these columns existed
     await addColumn('tickers', 'start_time', 'DATETIME DEFAULT NULL AFTER is_active');
-    await addColumn('tickers', 'end_time',   'DATETIME DEFAULT NULL AFTER start_time');
+    await addColumn('tickers', 'end_time', 'DATETIME DEFAULT NULL AFTER start_time');
     await addColumn('tickers', 'created_by', 'INT DEFAULT NULL');
 
     await db.execute(`
@@ -426,9 +426,9 @@ const runMigrations = async () => {
 
     // Ensure user_id column exists for existing tables
     await addColumn('expiry_rules', 'user_id', 'INT DEFAULT NULL AFTER id');
-    
+
     // Add unique constraint if not already there
-    try { await db.execute('ALTER TABLE expiry_rules ADD UNIQUE KEY uq_user_expiry (user_id)'); } catch(_) {}
+    try { await db.execute('ALTER TABLE expiry_rules ADD UNIQUE KEY uq_user_expiry (user_id)'); } catch (_) { }
 
     // Seed initial rule for the first SUPERADMIN found
     const [[sa]] = await db.execute("SELECT id FROM users WHERE role = 'SUPERADMIN' LIMIT 1");
@@ -518,7 +518,7 @@ const runMigrations = async () => {
     // Add TRADER to target_role enum if not present
     try {
         await db.execute("ALTER TABLE notifications MODIFY COLUMN target_role ENUM('SUPERADMIN','ADMIN','BROKER','TRADER','ALL') DEFAULT 'ALL'");
-    } catch (_) {}
+    } catch (_) { }
 
     // Add target_user_ids column for multi-user targeting
     await addColumn('notifications', 'target_user_ids', 'TEXT DEFAULT NULL');
@@ -624,7 +624,7 @@ const runMigrations = async () => {
     `);
 
     // ─── 14. PAPER TRADING TABLES ──────────────────────────────────────────────
-    
+
     // Per-user Kite sessions
     await db.execute(`
         CREATE TABLE IF NOT EXISTS user_kite_sessions (
@@ -719,7 +719,7 @@ const runMigrations = async () => {
     `);
 
     // ─── 15. MARKET WATCH & SCRIP GROUPS ──────────────────────────────────────
-    
+
     await db.execute(`
         CREATE TABLE IF NOT EXISTS market_groups (
             id          INT AUTO_INCREMENT PRIMARY KEY,

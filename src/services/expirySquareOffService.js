@@ -41,11 +41,11 @@ const startExpirySquareOffJob = () => {
             const currentH = istNow.getHours();
             const currentM = istNow.getMinutes();
             const currentTimeStr = `${currentH.toString().padStart(2, '0')}:${currentM.toString().padStart(2, '0')}`;
-            
+
             if (currentM % 10 === 0) { // Log every 10 mins to avoid spam
                 console.log(`[ExpirySquareOff] 🕒 Cron running at ${currentTimeStr} IST`);
             }
-            console.log(`[ExpirySquareOff] ⏰ IST Time: ${String(currentH).padStart(2,'0')}:${String(currentM).padStart(2,'0')} | UTC: ${now.toISOString()}`);
+            console.log(`[ExpirySquareOff] ⏰ IST Time: ${String(currentH).padStart(2, '0')}:${String(currentM).padStart(2, '0')} | UTC: ${now.toISOString()}`);
 
             const [allUsers] = await db.execute('SELECT id, parent_id FROM users');
 
@@ -102,7 +102,7 @@ const startExpirySquareOffJob = () => {
                         const isComex = mType === 'COMEX';
 
                         if (!isNSE && !isMCX && !isCrypto && !isForex && !isComex) continue; // Skip other segments for now
-                        
+
                         // Check segment specific trigger
                         if (isNSE && !isNseTriggered) continue;
                         if (isMCX && !isMcxTriggered) continue;
@@ -125,7 +125,7 @@ const startExpirySquareOffJob = () => {
                             }
 
                             holdingMarginRequired = holdingExposure * trade.qty;
-                        } 
+                        }
                         else if (isNSE) {
                             // ✅ NSE/NFO LOGIC (Exposure-based: Turnover / Divisor)
                             const holdingDivisor = parseFloat(userConfig?.equityHoldingMargin || 100);
@@ -153,7 +153,7 @@ const startExpirySquareOffJob = () => {
                         if (parseFloat(trade.balance) < holdingMarginRequired) {
                             try {
                                 console.log(`[ExpirySquareOff] 🚨 Closing trade #${trade.id} (${trade.symbol}) due to insufficient margin: Bal=${trade.balance} < Req=${holdingMarginRequired.toFixed(2)}`);
-                                const result = await tradeService.closeTrade(trade.id, null, 0); 
+                                const result = await tradeService.closeTrade(trade.id, null, 0);
                                 if (result.success) {
                                     console.log(`[ExpirySquareOff] ✅ Squared off trade #${trade.id} (${trade.symbol}) @ ${result.exitPrice || 'market'}`);
                                 }

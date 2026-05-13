@@ -174,18 +174,18 @@ const placeOrder = async (req, res) => {
                     else if (marketType === 'EQUITY') kiteSymbol = `NSE:${symbol}`;
                     else if (marketType === 'OPTIONS' || marketType === 'NFO') kiteSymbol = `NFO:${symbol}`;
                 }
-                
+
                 const quote = await kiteService.getQuote(kiteSymbol);
                 const instrumentKey = Object.keys(quote)[0];
                 if (quote[instrumentKey] && quote[instrumentKey].last_price) {
                     liveMarketPrice = quote[instrumentKey].last_price;
                     console.log(`[placeOrder] ✅ Direct Kite Quote for ${kiteSymbol}: ${liveMarketPrice}`);
-                    
+
                     // Also feed this back to MarketDataService for others
-                    marketDataService.prices[kiteSymbol] = { 
-                        ...marketDataService.prices[kiteSymbol], 
-                        ltp: liveMarketPrice, 
-                        symbol: kiteSymbol 
+                    marketDataService.prices[kiteSymbol] = {
+                        ...marketDataService.prices[kiteSymbol],
+                        ltp: liveMarketPrice,
+                        symbol: kiteSymbol
                     };
                 }
             } catch (kiteErr) {
@@ -1569,7 +1569,7 @@ const closeTrade = async (req, res) => {
         const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
         const marketTypeForClose = (trade.market_type || 'MCX').toUpperCase();
         const prefixForClose = marketTypeForClose === 'EQUITY' ? 'NSE' : (marketTypeForClose === 'OPTIONS' ? 'NFO' : marketTypeForClose);
-        
+
         let livePriceForClose = null;
         const possibleSymbolsForClose = [trade.symbol, `${prefixForClose}:${cleanSymbol}`, cleanSymbol];
         const marketDataService = require('../services/MarketDataService');

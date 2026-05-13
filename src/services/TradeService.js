@@ -9,7 +9,7 @@ const { getLotSize } = require('../utils/symbolHelper');
  * Service to handle core Trade operations like closing and auto-squaring off.
  */
 class TradeService {
-    
+
     /**
      * Closes a single trade by its ID.
      * Reusable for manual close, auto-close, and expiry square-off.
@@ -110,7 +110,7 @@ class TradeService {
                 const { getMcxBaseScrip } = require('../utils/symbolHelper');
                 const base = getMcxBaseScrip(trade.symbol);
                 const marketDataService = require('./MarketDataService');
-                
+
                 // 🎯 1. Try Memory Ticker (Multiple Prefixes)
                 const searchPatterns = [trade.symbol, `MCX:${trade.symbol}`, `NFO:${trade.symbol}`, `NSE:${trade.symbol}`];
                 let liveData = null;
@@ -118,12 +118,12 @@ class TradeService {
                     liveData = marketDataService.getPrice(p);
                     if (liveData) break;
                 }
-                
+
                 if (liveData) {
                     finalExitPrice = trade.type === 'BUY' ? (liveData.bid || liveData.ltp) : (liveData.ask || liveData.ltp);
                     console.log(`[TradeService] Found in Ticker: ${finalExitPrice} (${trade.type === 'BUY' ? 'BID' : 'ASK'})`);
-                } 
-                
+                }
+
                 // 🎯 2. Fallback to Kite API (Full Quote)
                 if ((!finalExitPrice || finalExitPrice <= 0) && kiteService.isAuthenticated()) {
                     try {
@@ -132,8 +132,8 @@ class TradeService {
                         const quoteRes = await kiteService.getQuote(kiteSym);
                         const quote = quoteRes[kiteSym] || Object.values(quoteRes)[0];
                         if (quote) {
-                            finalExitPrice = trade.type === 'BUY' 
-                                ? (quote.depth?.buy?.[0]?.price || quote.last_price) 
+                            finalExitPrice = trade.type === 'BUY'
+                                ? (quote.depth?.buy?.[0]?.price || quote.last_price)
                                 : (quote.depth?.sell?.[0]?.price || quote.last_price);
                             console.log(`[TradeService] Kite Quote Received: ${finalExitPrice}`);
                         }
@@ -298,7 +298,7 @@ class TradeService {
                         const rate = parseFloat(clientConfig.cryptoBrokerage || 0);
                         brokerage = calcBrokerage(rate, 'PER_LOT', qtyForClientBrokerage, finalExitPrice, trade.entry_price, multiplierForClientBrokerage);
                     }
-                    
+
                     if (brokerage > 0) {
                         console.log(`[TradeService] Fallback ${mType} Brokerage Calculated: ${brokerage.toFixed(2)}`);
                     }
@@ -344,13 +344,13 @@ class TradeService {
             await connection.commit();
 
             // 6. Housekeeping (Logs & Cache)
-            await logAction(requesterId || trade.user_id, 'CLOSE_TRADE', 'trades', 
+            await logAction(requesterId || trade.user_id, 'CLOSE_TRADE', 'trades',
                 `Closed trade #${trade.id} @ ${finalExitPrice}. PnL: ${pnl.toFixed(2)}, Brokerage: ${brokerage}, Swap: ${swap}`);
-            
+
             try {
                 await invalidateCache(`m2m_${trade.user_id}_TRADER`);
                 await invalidateCache(`m2m_${trade.user_id}_BROKER`);
-            } catch (_) {}
+            } catch (_) { }
 
             return { success: true, pnl, brokerage, swap, balanceChange };
         } catch (err) {
