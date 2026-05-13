@@ -103,7 +103,7 @@ const startRolloverMarginJob = () => {
                         } else {
                             console.log(`[RolloverCheck] 🚨 Insufficient funds for rollover - Auto-closing trade #${trade.id}`);
                             // Force close using central TradeService logic
-                            await tradeService.closeTrade(trade.id, null, 0);
+                            await tradeService.closeTrade(trade.id, null, 0, null, 'Insufficient Holding Margin');
                         }
                     } catch (err) {
                         console.error(`[RolloverCheck] Error trade #${trade.id}:`, err.message);

@@ -75,14 +75,19 @@ class InstrumentSyncService {
                 // STRICT MATCHING: Only sync what is explicitly in our market groups
                 if (!baseSymbols.has(symbol) && !baseSymbols.has(fullKey)) continue;
 
-                let marketType = 'OTHER';
+                let marketType = null;
                 if (exchange === 'NSE') marketType = 'NSE';
                 else if (exchange === 'NFO') marketType = 'NFO';
                 else if (exchange === 'MCX') marketType = 'MCX';
+                else if (exchange === 'BSE') marketType = 'EQUITY';
+                else if (exchange === 'CDS' || exchange === 'BCD') marketType = 'FOREX';
 
-                const key = `${exchange}:${symbol}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
+                if (!marketType) {
+                    continue; // Skip unsupported exchanges
+                }
+
+                if (seen.has(symbol)) continue;
+                seen.add(symbol);
 
                 let lotSize = parseInt(i.lot_size) || 1;
                 // MCX Special Lot Size Handling
@@ -96,7 +101,7 @@ class InstrumentSyncService {
                     lot_size: lotSize,
                     market_type: marketType,
                     exchange: exchange,
-                    expiry: i.expiry
+                    expiry: i.expiry ? i.expiry : null
                 });
             }
 
@@ -115,7 +120,13 @@ class InstrumentSyncService {
                 const batchSize = 100;
                 for (let i = 0; i < toSync.length; i += batchSize) {
                     const batch = toSync.slice(i, i + batchSize);
-                    const values = batch.map(item => [item.symbol, item.lot_size, 50, item.market_type, item.expiry]);
+                    const values = batch.map(item => [
+                        item.symbol,
+                        item.lot_size,
+                        50,
+                        item.market_type,
+                        item.expiry ? item.expiry : null
+                    ]);
 
                     await connection.query(
                         'INSERT INTO scrip_data (symbol, lot_size, margin_req, market_type, expiry_date) VALUES ?',

@@ -365,7 +365,7 @@ class TradeService {
      * Closes all open positions and cancels all pending orders for a user.
      * Used for RMS Auto-Squaring off.
      */
-    async closeAllUserTrades(userId, requesterId = 0, reason = 'RMS_AUTO_CLOSE') {
+    async closeAllUserTrades(userId, requesterId = 0, reason = 'RMS_AUTO_CLOSE', remark = null) {
         const [trades] = await db.execute(
             "SELECT id FROM trades WHERE user_id = ? AND status = 'OPEN'",
             [userId]
@@ -374,7 +374,7 @@ class TradeService {
         const results = [];
         for (const trade of trades) {
             try {
-                const res = await this.closeTrade(trade.id, null, requesterId);
+                const res = await this.closeTrade(trade.id, null, requesterId, null, remark);
                 results.push({ id: trade.id, success: true, ...res });
             } catch (err) {
                 console.error(`[TradeService] Failed to auto-close trade #${trade.id}:`, err.message);

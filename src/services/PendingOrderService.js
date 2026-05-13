@@ -114,17 +114,3 @@ const startPendingOrderMonitoring = () => {
 };
 
 module.exports = { startPendingOrderMonitoring };
- * Checks every 3 seconds for price matches
-    */
-const startPendingOrderMonitoring = () => {
-        setInterval(() => {
-            if (isMonitoring) return;
-            isMonitoring = true;
-            monitorPendingOrders()
-                .finally(() => { isMonitoring = false; });
-        }, 3000);
-
-        console.log('[PendingOrder] 🚀 Pending order matching service started (3s interval)');
-    };
-
-module.exports = { startPendingOrderMonitoring };

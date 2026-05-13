@@ -247,9 +247,7 @@ const getClientLiveM2M = async (req, res) => {
 
             stats.brokerage[segment] += parseFloat(trade.brokerage || 0);
 
-            if (trade.status === 'CLOSED') {
-                stats.profitLoss[segment] += parseFloat(trade.pnl || 0);
-            }
+
 
             if (trade.status === 'OPEN') {
                 stats.activeUsers[segment].add(trade.user_id);

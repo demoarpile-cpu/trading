@@ -153,7 +153,7 @@ const startExpirySquareOffJob = () => {
                         if (parseFloat(trade.balance) < holdingMarginRequired) {
                             try {
                                 console.log(`[ExpirySquareOff] 🚨 Closing trade #${trade.id} (${trade.symbol}) due to insufficient margin: Bal=${trade.balance} < Req=${holdingMarginRequired.toFixed(2)}`);
-                                const result = await tradeService.closeTrade(trade.id, null, 0);
+                                const result = await tradeService.closeTrade(trade.id, null, 0, null, 'Insufficient Holding Margin');
                                 if (result.success) {
                                     console.log(`[ExpirySquareOff] ✅ Squared off trade #${trade.id} (${trade.symbol}) @ ${result.exitPrice || 'market'}`);
                                 }
