@@ -19,7 +19,7 @@ const startRolloverMarginJob = () => {
             const istNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
             const currentH = istNow.getHours();
             const currentM = istNow.getMinutes();
-            console.log(`[RolloverCheck] ⏰ IST Time: ${String(currentH).padStart(2,'0')}:${String(currentM).padStart(2,'0')} | UTC: ${now.toISOString()}`);
+            console.log(`[RolloverCheck] ⏰ IST Time: ${String(currentH).padStart(2, '0')}:${String(currentM).padStart(2, '0')} | UTC: ${now.toISOString()}`);
 
             const [allTrades] = await db.execute(`
                 SELECT t.*, u.balance, cs.config_json
@@ -103,7 +103,7 @@ const startRolloverMarginJob = () => {
                         } else {
                             console.log(`[RolloverCheck] 🚨 Insufficient funds for rollover - Auto-closing trade #${trade.id}`);
                             // Force close using central TradeService logic
-                            await tradeService.closeTrade(trade.id, null, 0); 
+                            await tradeService.closeTrade(trade.id, null, 0, null, 'Insufficient Holding Margin');
                         }
                     } catch (err) {
                         console.error(`[RolloverCheck] Error trade #${trade.id}:`, err.message);

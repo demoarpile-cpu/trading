@@ -89,7 +89,8 @@ class RMSService {
             if (totalPnL < 0 && lossPercentage >= autoCloseThreshold && isAutoCloseActive) {
                 console.log(`[RMSService] 🚨 DYNAMIC AUTO-CLOSE for User #${user.id}: Loss=${lossPercentage.toFixed(2)}% (Threshold: ${autoCloseThreshold}%)`);
                 
-                await tradeService.closeAllUserTrades(user.id, 0, 'RMS_AUTO_CLOSE');
+                const remark = `${Math.round(autoCloseThreshold)}% Loss Limit Breached`;
+                await tradeService.closeAllUserTrades(user.id, 0, 'RMS_AUTO_CLOSE', remark);
                 
                 // Notify user via socket immediately
                 this.sendSocketAlert(user.id, `🚨 AUTO-SQUARE OFF: Account losses reached ${lossPercentage.toFixed(2)}% of balance. All trades closed automatically.`);

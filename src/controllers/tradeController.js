@@ -174,18 +174,18 @@ const placeOrder = async (req, res) => {
                     else if (marketType === 'EQUITY') kiteSymbol = `NSE:${symbol}`;
                     else if (marketType === 'OPTIONS' || marketType === 'NFO') kiteSymbol = `NFO:${symbol}`;
                 }
-                
+
                 const quote = await kiteService.getQuote(kiteSymbol);
                 const instrumentKey = Object.keys(quote)[0];
                 if (quote[instrumentKey] && quote[instrumentKey].last_price) {
                     liveMarketPrice = quote[instrumentKey].last_price;
                     console.log(`[placeOrder] ✅ Direct Kite Quote for ${kiteSymbol}: ${liveMarketPrice}`);
-                    
+
                     // Also feed this back to MarketDataService for others
-                    marketDataService.prices[kiteSymbol] = { 
-                        ...marketDataService.prices[kiteSymbol], 
-                        ltp: liveMarketPrice, 
-                        symbol: kiteSymbol 
+                    marketDataService.prices[kiteSymbol] = {
+                        ...marketDataService.prices[kiteSymbol],
+                        ltp: liveMarketPrice,
+                        symbol: kiteSymbol
                     };
                 }
             } catch (kiteErr) {
@@ -193,12 +193,9 @@ const placeOrder = async (req, res) => {
             }
         }
 
-        // 3. Last Resort: Mock Engine (ONLY if still null)
+        // 3. Reject order if live price is unavailable (No Mock Fallback Allowed)
         if (!liveMarketPrice) {
-            liveMarketPrice = mockEngine.getPrice(symbol);
-            if (liveMarketPrice) {
-                console.log(`[placeOrder] ℹ️ Using Mock Engine fallback for ${symbol}: ${liveMarketPrice}`);
-            }
+            return res.status(400).json({ message: 'Kite Zerodha is not connected. Please login first.' });
         }
 
         const executionPrice = price ? parseFloat(price) : (order_type === 'MARKET' ? liveMarketPrice : 0);
@@ -252,6 +249,42 @@ const placeOrder = async (req, res) => {
             });
         }
         console.log('[placeOrder] ✅ Segment enabled check passed for:', marketType);
+
+        // ─── TIER 2: SCALPING STOP LOSS & SAME-SYMBOL HOLD TIME LOCK CHECK ───
+        let minTimeSecondsForScalping = 0;
+        if (marketType === 'MCX') minTimeSecondsForScalping = parseInt(clientConfig.mcxMinTimeToBookProfit || 0);
+        else if (marketType === 'EQUITY') minTimeSecondsForScalping = parseInt(clientConfig.equityMinTimeToBookProfit || 0);
+        else if (marketType === 'OPTIONS') minTimeSecondsForScalping = parseInt(clientConfig.optionsMinTimeToBookProfit || 0);
+        else if (marketType === 'CRYPTO') minTimeSecondsForScalping = parseInt((clientConfig.cryptoConfig || {}).minTimeToBookProfit || 0);
+        else if (marketType === 'FOREX') minTimeSecondsForScalping = parseInt((clientConfig.forexConfig || {}).minTimeToBookProfit || 0);
+        else if (marketType === 'COMEX') minTimeSecondsForScalping = parseInt((clientConfig.comexConfig || {}).minTimeToBookProfit || 0);
+
+        let scalpingStopLossEnabled = false;
+        if (marketType === 'MCX') scalpingStopLossEnabled = clientConfig.mcxScalpingStopLoss === 'Enabled';
+        else if (marketType === 'EQUITY') scalpingStopLossEnabled = clientConfig.equityScalpingStopLoss === 'Enabled';
+        else if (marketType === 'OPTIONS') scalpingStopLossEnabled = clientConfig.optionsScalpingStopLoss === 'Enabled';
+        else if (marketType === 'CRYPTO') scalpingStopLossEnabled = (clientConfig.cryptoConfig || {}).scalpingStopLoss === 'Enabled';
+        else if (marketType === 'FOREX') scalpingStopLossEnabled = (clientConfig.forexConfig || {}).scalpingStopLoss === 'Enabled';
+        else if (marketType === 'COMEX') scalpingStopLossEnabled = (clientConfig.comexConfig || {}).scalpingStopLoss === 'Enabled';
+
+        if (order_type !== 'MARKET' && !scalpingStopLossEnabled && minTimeSecondsForScalping > 0) {
+            // Check if there is any active (OPEN) trade of the same symbol for this user
+            const [activeSameSymbolTrades] = await db.execute(
+                'SELECT id, entry_time FROM trades WHERE user_id = ? AND symbol = ? AND status = "OPEN"',
+                [targetUserId, symbol]
+            );
+
+            for (const activeTrade of activeSameSymbolTrades) {
+                const activeEntryTime = new Date(activeTrade.entry_time);
+                const secondsHeldActive = Math.floor((new Date() - activeEntryTime) / 1000);
+                if (secondsHeldActive < minTimeSecondsForScalping) {
+                    const remaining = minTimeSecondsForScalping - secondsHeldActive;
+                    return res.status(400).json({
+                        message: `Scalping Stop Loss is Disabled. Multiple orders on the same symbol are blocked during hold time. Please wait ${remaining} seconds before re-entering.`
+                    });
+                }
+            }
+        }
 
         // ─── PERMANENT SCRIP BAN CHECK ──────────────────────────────────────────
         const [scripBan] = await db.execute('SELECT id FROM banned_scrips WHERE symbol = ?', [symbol]);
@@ -519,7 +552,35 @@ const placeOrder = async (req, res) => {
 
             // Away points check for limit orders (TIER 2 - Enhanced with segment-specific limits)
             if (order_type !== 'MARKET' && price) {
-                const currentPriceNow = mockEngine.getPrice(symbol);
+                // Get real price from MarketDataService or Kite (No Mock Fallback Allowed)
+                let currentPriceNow = null;
+                const searchPatterns = [symbol, `MCX:${symbol}`, `NFO:${symbol}`, `NSE:${symbol}`];
+                for (const p of searchPatterns) {
+                    const data = marketDataService.getPrice(p);
+                    if (data && data.ltp) {
+                        currentPriceNow = data.ltp;
+                        break;
+                    }
+                }
+
+                const kiteService = require('../utils/kiteService');
+                if (!currentPriceNow && kiteService.isAuthenticated()) {
+                    try {
+                        const kiteSym = symbol.includes(':') ? symbol : (marketType === 'MCX' ? `MCX:${symbol}` : (marketType === 'EQUITY' ? `NSE:${symbol}` : `NFO:${symbol}`));
+                        const quoteRes = await kiteService.getQuote(kiteSym);
+                        const quote = quoteRes[kiteSym] || Object.values(quoteRes)[0];
+                        if (quote && quote.last_price) {
+                            currentPriceNow = quote.last_price;
+                        }
+                    } catch (e) {
+                        console.warn(`[placeOrder] Kite Quote Failed for ${symbol} during away-points check:`, e.message);
+                    }
+                }
+
+                if (!currentPriceNow) {
+                    return res.status(400).json({ message: 'Kite Zerodha is not connected. Please login first.' });
+                }
+
                 const diff = Math.abs(parseFloat(price) - currentPriceNow);
 
                 // Check expiry rule away points first (if configured)
@@ -1569,7 +1630,7 @@ const closeTrade = async (req, res) => {
         const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
         const marketTypeForClose = (trade.market_type || 'MCX').toUpperCase();
         const prefixForClose = marketTypeForClose === 'EQUITY' ? 'NSE' : (marketTypeForClose === 'OPTIONS' ? 'NFO' : marketTypeForClose);
-        
+
         let livePriceForClose = null;
         const possibleSymbolsForClose = [trade.symbol, `${prefixForClose}:${cleanSymbol}`, cleanSymbol];
         const marketDataService = require('../services/MarketDataService');
@@ -1587,26 +1648,9 @@ const closeTrade = async (req, res) => {
             ? (currentPrice - trade.entry_price) * actualQuantity
             : (trade.entry_price - currentPrice) * actualQuantity;
 
-        if (validationPnl > 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
+        if (minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
             return res.status(400).json({
-                message: `Minimum profit booking time is ${minTimeSeconds} seconds. Please wait ${minTimeSeconds - secondsHeld} more second(s).`,
-                remainingSeconds: minTimeSeconds - secondsHeld
-            });
-        }
-
-        let scalpingStopLossEnabled = false;
-        if (trade.market_type === 'MCX') scalpingStopLossEnabled = clientConfig.mcxScalpingStopLoss === 'Enabled';
-        else if (trade.market_type === 'EQUITY') scalpingStopLossEnabled = clientConfig.equityScalpingStopLoss === 'Enabled';
-        else if (trade.market_type === 'OPTIONS') scalpingStopLossEnabled = clientConfig.optionsScalpingStopLoss === 'Enabled';
-        else if (trade.market_type === 'CRYPTO') scalpingStopLossEnabled = (clientConfig.cryptoConfig || {}).scalpingStopLoss === 'Enabled';
-        else if (trade.market_type === 'FOREX') scalpingStopLossEnabled = (clientConfig.forexConfig || {}).scalpingStopLoss === 'Enabled';
-        else if (trade.market_type === 'COMEX') scalpingStopLossEnabled = (clientConfig.comexConfig || {}).scalpingStopLoss === 'Enabled';
-
-        // If Scalping SL is DISABLED → loss booking bhi min time ke baad hi hogi
-        // If Scalping SL is ENABLED → loss booking kisi bhi time kar sakte
-        if (!scalpingStopLossEnabled && validationPnl < 0 && minTimeSeconds > 0 && secondsHeld < minTimeSeconds) {
-            return res.status(400).json({
-                message: `Cannot close in loss before minimum time (${minTimeSeconds}s). Please wait ${minTimeSeconds - secondsHeld} more second(s).`,
+                message: `Minimum hold time is ${minTimeSeconds} seconds. Please wait ${minTimeSeconds - secondsHeld} more second(s).`,
                 remainingSeconds: minTimeSeconds - secondsHeld
             });
         }

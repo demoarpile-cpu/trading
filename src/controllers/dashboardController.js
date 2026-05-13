@@ -31,7 +31,7 @@ const syncPricesForTrades = async (trades) => {
         if (openSymbols.size === 0) return;
 
         const symbolsArr = Array.from(openSymbols);
-        
+
         // 1. Subscribe in live ticker so we get future updates
         const instrumentsBySymbol = await instrumentService.getInstrumentsBySymbols(symbolsArr);
         symbolsArr.forEach(symbol => {
@@ -140,7 +140,7 @@ const getClientLiveM2M = async (req, res) => {
             // We follow the same logic here to ensure cross-platform consistency.
             const base = getMcxBaseScrip(symbol);
             if (base && MCX_LOT_SIZES[base]) return MCX_LOT_SIZES[base];
-            
+
             // Try trimmed symbol (e.g. SILVER26MAYFUT -> SILVER)
             const symTrimmed = symbol.split(':').pop().toUpperCase().replace(/\d+.*/, '');
             if (MCX_LOT_SIZES[symTrimmed]) return MCX_LOT_SIZES[symTrimmed];
@@ -228,12 +228,12 @@ const getClientLiveM2M = async (req, res) => {
             }
 
             const lotSize = getMultiplier(trade.symbol, mType, userConfig);
-            
+
             // App Sync logic: 
             // For MCX, totalUnits is ALWAYS qty * multiplier (lotSize)
             // For NSE, qty is already the number of units/shares.
             let totalUnits = qty * lotSize;
-            
+
             // Fallback to actual_qty only for non-MCX if it exists
             if (mType !== 'MCX' && trade.actual_qty && parseFloat(trade.actual_qty) > 0) {
                 totalUnits = parseFloat(trade.actual_qty);
@@ -247,9 +247,7 @@ const getClientLiveM2M = async (req, res) => {
 
             stats.brokerage[segment] += parseFloat(trade.brokerage || 0);
 
-            if (trade.status === 'CLOSED') {
-                stats.profitLoss[segment] += parseFloat(trade.pnl || 0);
-            }
+
 
             if (trade.status === 'OPEN') {
                 stats.activeUsers[segment].add(trade.user_id);
@@ -258,7 +256,7 @@ const getClientLiveM2M = async (req, res) => {
 
                 const prefix = PREFIX_MAP[mType] || mType;
                 const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
-                
+
                 // 🎯 Try multiple symbol patterns to find the live price in the ticker
                 const searchPatterns = [
                     trade.symbol,                                      // 1. Raw symbol (e.g. "NFO:NIFTY26MAYFUT")
@@ -306,7 +304,7 @@ const getClientLiveM2M = async (req, res) => {
                 // --- Dynamic Margin Calculation (matching Mobile App Portfolio) ---
                 const base = getMcxBaseScrip(trade.symbol);
                 const isNSE = (trade.market_type === 'EQUITY' || trade.market_type === 'NSE' || trade.market_type === 'NFO');
-                
+
                 // Default: 1000000 for MCX, 50 for NSE Equity (as divisor)
                 const defaultHolding = isNSE ? 50 : 1000000;
                 let holdingExposure = parseFloat(userConfig?.mcxHoldingMargin || defaultHolding);
@@ -435,9 +433,9 @@ const getIndices = async (req, res) => {
         const kiteService = require('../utils/kiteService');
 
         // Step 1: Try WebSocket prices (live, when market open)
-        let nifty     = marketDataService.getPrice('NSE:NIFTY 50')          || {};
-        let banknifty = marketDataService.getPrice('NSE:NIFTY BANK')         || {};
-        let finnifty  = marketDataService.getPrice('NSE:NIFTY FIN SERVICE')  || {};
+        let nifty = marketDataService.getPrice('NSE:NIFTY 50') || {};
+        let banknifty = marketDataService.getPrice('NSE:NIFTY BANK') || {};
+        let finnifty = marketDataService.getPrice('NSE:NIFTY FIN SERVICE') || {};
 
         console.log('📊 Getting Indices - Kite Auth:', kiteService.isAuthenticated());
         console.log('📊 WebSocket Data:', { nifty: nifty.ltp, banknifty: banknifty.ltp, finnifty: finnifty.ltp });
@@ -504,16 +502,16 @@ const getIndices = async (req, res) => {
                 change: raw.change || 0,
                 chg_pct: raw.chg_pct || 0,
                 high: raw.ohlc?.high || 0,
-                low:  raw.ohlc?.low  || 0,
+                low: raw.ohlc?.low || 0,
                 open: raw.ohlc?.open || 0,
                 close: raw.ohlc?.close || 0,
             };
         };
 
         const result = [
-            toIndex(nifty,     'NIFTY 50'),
+            toIndex(nifty, 'NIFTY 50'),
             toIndex(banknifty, 'NIFTY BANK'),
-            toIndex(finnifty,  'NIFTY FIN SERVICE'),
+            toIndex(finnifty, 'NIFTY FIN SERVICE'),
         ];
 
         console.log('📊 Final Indices Response:', result.map(r => ({ name: r.name, ltp: r.ltp })));
@@ -616,18 +614,18 @@ module.exports = {
                     const cleanSymbol = trade.symbol.includes(':') ? trade.symbol.split(':')[1] : trade.symbol;
                     const marketType = (trade.market_type || 'MCX').toUpperCase();
                     const prefix = marketType === 'EQUITY' ? 'NSE' : (marketType === 'OPTIONS' ? 'NFO' : marketType);
-                    
+
                     const possibleSymbols = [trade.symbol, `${prefix}:${cleanSymbol}`, cleanSymbol];
                     let liveData = null;
                     for (const s of possibleSymbols) {
                         liveData = marketDataService.getPrice(s);
                         if (liveData) break;
                     }
-                    
+
                     if (liveData && liveData.ltp) {
                         currentPrice = liveData.ltp;
                     }
-                } catch (_) {}
+                } catch (_) { }
 
                 const baseSymbol = Object.keys(INSTRUMENT_META).find(key =>
                     trade.symbol.toUpperCase().includes(key)
