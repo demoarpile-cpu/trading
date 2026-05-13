@@ -357,6 +357,10 @@ function buildUnifiedRow({ type, symbol, strike, optionType, expiry, quote, lotS
         oi: quote?.oi || 0,
         volume: quote?.volume || 0,
         change: chgPct,
+        open: quote?.ohlc?.open || 0,
+        high: quote?.ohlc?.high || 0,
+        low: quote?.ohlc?.low || 0,
+        close: close,
         lotSize: lotSize || 1
     };
 }
