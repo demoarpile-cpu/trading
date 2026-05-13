@@ -1,6 +1,8 @@
 const cron = require('node-cron');
 const db = require('../config/db');
 const { getMcxBaseScrip } = require('../utils/symbolHelper');
+const MarginUtils = require('../utils/MarginUtils');
+const MarginService = require('./MarginService');
 
 /**
  * Helper to calculate brokerage based on type
@@ -38,6 +40,11 @@ const startExpirySquareOffJob = () => {
             const istNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
             const currentH = istNow.getHours();
             const currentM = istNow.getMinutes();
+            const currentTimeStr = `${currentH.toString().padStart(2, '0')}:${currentM.toString().padStart(2, '0')}`;
+            
+            if (currentM % 10 === 0) { // Log every 10 mins to avoid spam
+                console.log(`[ExpirySquareOff] 🕒 Cron running at ${currentTimeStr} IST`);
+            }
             console.log(`[ExpirySquareOff] ⏰ IST Time: ${String(currentH).padStart(2,'0')}:${String(currentM).padStart(2,'0')} | UTC: ${now.toISOString()}`);
 
             const [allUsers] = await db.execute('SELECT id, parent_id FROM users');
@@ -88,7 +95,7 @@ const startExpirySquareOffJob = () => {
                     try {
                         const userConfig = JSON.parse(trade.config_json || '{}');
                         const mType = (trade.market_type || '').toUpperCase();
-                        const isNSE = ['NSE', 'EQUITY', 'NIFTY', 'OPTIONS', 'NFO'].includes(mType);
+                        const isNSE = ['NSE', 'EQUITY', 'NIFTY', 'OPTIONS', 'NFO', 'INDEX', 'INDICES', 'NSE_INDEX'].includes(mType) || (trade.symbol || '').toUpperCase().includes('NIFTY');
                         const isMCX = mType === 'MCX';
                         const isCrypto = mType === 'CRYPTO';
                         const isForex = mType === 'FOREX';
@@ -141,15 +148,17 @@ const startExpirySquareOffJob = () => {
 
                         console.log(`[ExpirySquareOff] 📊 Checking Trade #${trade.id} (${trade.symbol}): Required: ${holdingMarginRequired.toFixed(2)}, Available: ${trade.balance}`);
 
-                        // 🎯 If balance is less than required holding margin, square off
+                        // ─── FINAL DECISION: SHOULD WE CLOSE? ──────────────────────────
+                        // Only close if available balance is less than required margin
                         if (parseFloat(trade.balance) < holdingMarginRequired) {
-                            console.log(`[ExpirySquareOff] 🚨 Auto-squaring off trade #${trade.id} for User #${trade.user_id} (Insufficient Holding Margin)`);
-                            
-                            // Use central TradeService for consistent price/brokerage/balance logic
-                            const result = await tradeService.closeTrade(trade.id, null, 0); 
-                            
-                            if (result.success) {
-                                console.log(`[ExpirySquareOff] ✅ Squared off trade #${trade.id} @ ${result.exitPrice || 'market'}`);
+                            try {
+                                console.log(`[ExpirySquareOff] 🚨 Closing trade #${trade.id} (${trade.symbol}) due to insufficient margin: Bal=${trade.balance} < Req=${holdingMarginRequired.toFixed(2)}`);
+                                const result = await tradeService.closeTrade(trade.id, null, 0); 
+                                if (result.success) {
+                                    console.log(`[ExpirySquareOff] ✅ Squared off trade #${trade.id} (${trade.symbol}) @ ${result.exitPrice || 'market'}`);
+                                }
+                            } catch (closeErr) {
+                                console.error(`[ExpirySquareOff] ❌ Failed to auto-close trade #${trade.id}:`, closeErr.message);
                             }
                         }
                     } catch (err) {

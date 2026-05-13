@@ -11,7 +11,7 @@ const startMarketCloseSquareOffJob = () => {
     // 1. NSE/NFO Square-off: 3:20 PM IST (Mon-Fri)
     cron.schedule('20 15 * * 1-5', async () => {
         console.log('[MarketClose] 🕒 NSE/NFO square-off time reached (15:20 IST)');
-        await processSegmentSquareOff(['EQUITY', 'NFO', 'OPTIONS', 'NSE']);
+        await processSegmentSquareOff(['EQUITY', 'NFO', 'OPTIONS', 'NSE', 'INDEX', 'INDICES', 'NSE_INDEX']);
     }, {
         scheduled: true,
         timezone: "Asia/Kolkata"
